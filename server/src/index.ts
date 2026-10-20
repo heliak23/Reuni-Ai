@@ -178,6 +178,14 @@ io.on('connection', (socket: Socket) => {
       isDeafened: false,
     };
 
+    // Clean up any old session with the same user ID to prevent ghost sockets
+    for (const [sId, sess] of connectedUsers.entries()) {
+      if (sess.user.id === user.id && sId !== socket.id) {
+        connectedUsers.delete(sId);
+      }
+    }
+
+    socket.join(`user:${user.id}`);
     connectedUsers.set(socket.id, { socketId: socket.id, user });
 
     // Send initial bootstrap payload
@@ -414,17 +422,13 @@ io.on('connection', (socket: Socket) => {
   // WebRTC Signaling for multi-user voice audio
   socket.on('webrtc:signal', (data: { to: string; signal: any }) => {
     const sender = connectedUsers.get(socket.id)?.user;
-    if (!sender) return;
+    if (!sender || !data.to) return;
 
-    for (const [targetSocketId, targetSession] of connectedUsers.entries()) {
-      if (targetSession.user.id === data.to) {
-        io.to(targetSocketId).emit('webrtc:signal', {
-          from: sender.id,
-          signal: data.signal,
-        });
-        break;
-      }
-    }
+    // Send directly to the target user's personal room
+    io.to(`user:${data.to}`).emit('webrtc:signal', {
+      from: sender.id,
+      signal: data.signal,
+    });
   });
 
   // Disconnection
