@@ -1,5 +1,15 @@
 # 🚀 Reuni-Ai — Plataforma de Comunicação e Reuniões em Tempo Real
 
+<p align="left">
+  <img src="https://img.shields.io/badge/React-19.3-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React 19" />
+  <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/Vite-8.3-646CFF?style=for-the-badge&logo=vite&logoColor=white" alt="Vite" />
+  <img src="https://img.shields.io/badge/Tailwind_CSS-v4-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white" alt="Tailwind CSS" />
+  <img src="https://img.shields.io/badge/Socket.io-4.8-010101?style=for-the-badge&logo=socket.io&logoColor=white" alt="Socket.io" />
+  <img src="https://img.shields.io/badge/WebRTC-P2P-333333?style=for-the-badge&logo=webrtc&logoColor=white" alt="WebRTC" />
+  <img src="https://img.shields.io/badge/Deploy-Render.com-46E3B7?style=for-the-badge&logo=render&logoColor=black" alt="Render" />
+</p>
+
 O **Reuni-Ai** é uma aplicação completa e moderna para comunicação por texto, voz e vídeo, desenvolvida para execução 100% online no navegador (Web), focada em performance, design moderno e colaboração fluida.
 
 ---
@@ -108,15 +118,27 @@ npm run dev
 
 ---
 
-## ☁️ Deploy na Nuvem via Railway (Tudo em 1 Único Serviço)
+## ☁️ Deploy na Nuvem via Render.com (Tudo em 1 Único Serviço)
 
-O **Reuni-Ai** já está 100% configurado para rodar em produção de forma unificada na **Railway**:
+O **Reuni-Ai** já está 100% configurado para rodar em produção de forma unificada no **[Render.com](https://render.com)**:
 
-1. Crie uma conta gratuita em [railway.app](https://railway.app).
-2. Clique em **"New Project"** -> **"Deploy from GitHub repo"**.
-3. Selecione o repositório do **Reuni-Ai**.
-4. A Railway detectará o arquivo [`railway.json`](file:///c:/Users/User/Documents/Portifolio/Reuni-Ai/railway.json) e executará automaticamente:
-   - `npm install` (instalando raiz, client e server).
-   - `npm run build` (compilando a SPA em React e o servidor TypeScript).
-   - `npm start` (iniciando o servidor Node.js que serve o frontend e os WebSockets na mesma porta).
-5. Na aba **Settings** do serviço na Railway, clique em **"Generate Domain"** para gerar seu link público seguro (`https://seu-reuni-ai.up.railway.app`). Prontinho!
+1. Acesse o painel do [render.com](https://render.com) e clique em **"New +"** ➔ **"Web Service"**.
+2. Conecte seu repositório do GitHub (`heliak23/Reuni-Ai`).
+3. Configure os seguintes parâmetros na tela de criação:
+   | Configuração | Valor Recomendado |
+   | :--- | :--- |
+   | **Name** | `reuni-ai` (ou o nome de sua preferência) |
+   | **Language / Runtime** | `Node` |
+   | **Branch** | `main` |
+   | **Region** | `Ohio (US East)` |
+   | **Build Command** | `npm install && npm run build` |
+   | **Start Command** | `npm start` |
+   | **Instance Type** | `Free` ($0/mês) |
+4. Na seção **Advanced**, deixe os campos padrão (não é necessário adicionar variáveis secretas).
+5. Clique em **"Deploy Web Service"**.
+6. O Render cuidará da compilação e deploy unificados, gerando um link público protegido por HTTPS (ex: `https://reuni-ai-xxxx.onrender.com`).
+
+> [!NOTE]
+> **HTTPS Obrigatório para Microfone & Tela:** O Render fornece certificado SSL automático gratuito. Isso garante que a API de captura do navegador (`getUserMedia` e `getDisplayMedia`) funcione sem restrições de segurança em qualquer computador ou celular.
+>
+> **Hibernação do Plano Free:** Instâncias gratuitas no Render entram em modo de hibernação após 15 minutos de inatividade. O primeiro acesso após hibernado pode levar cerca de ~40 segundos para inicializar o contêiner (*cold start*).
