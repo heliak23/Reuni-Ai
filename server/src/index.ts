@@ -420,15 +420,28 @@ io.on('connection', (socket: Socket) => {
   });
 
   // WebRTC Signaling for multi-user voice audio
-  socket.on('webrtc:signal', (data: { to: string; signal: any }) => {
+  socket.on('webrtc:signal', (data: { to: string; signal: any; from?: string }) => {
     const sender = connectedUsers.get(socket.id)?.user;
-    if (!sender || !data.to) return;
+    const senderId = sender?.id || data.from;
+    if (!senderId || !data.to) return;
 
-    // Send directly to the target user's personal room
+    console.log(`[WebRTC Signal] De ${sender?.username || senderId} para ${data.to} (${data.signal?.type || 'candidate'})`);
+
+    // Emit to target user's personal room
     io.to(`user:${data.to}`).emit('webrtc:signal', {
-      from: sender.id,
+      from: senderId,
       signal: data.signal,
     });
+
+    // Also emit directly to matching active socket IDs for redundancy
+    for (const [targetSocketId, targetSession] of connectedUsers.entries()) {
+      if (targetSession.user.id === data.to && targetSocketId !== socket.id) {
+        io.to(targetSocketId).emit('webrtc:signal', {
+          from: senderId,
+          signal: data.signal,
+        });
+      }
+    }
   });
 
   // Disconnection

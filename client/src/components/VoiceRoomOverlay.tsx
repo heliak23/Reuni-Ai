@@ -31,11 +31,21 @@ const RTC_CONFIG: RTCConfiguration = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
+    // Public OpenRelay TURN server for bypassing Symmetric NAT and firewalls
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelay',
+      credential: 'openrelay',
+    },
   ],
   iceCandidatePoolSize: 10,
 };
 
-// Component to reliably play remote audio in the DOM avoiding browser autoplay restrictions
+// Component to play remote audio in DOM without display:none to prevent browser audio throttling
 const RemoteAudioPlayer: React.FC<{
   stream: MediaStream;
   isDeafened?: boolean;
@@ -52,18 +62,26 @@ const RemoteAudioPlayer: React.FC<{
       el.srcObject = stream;
     }
 
-    const tryPlay = () => {
-      el.play().catch((err) => {
+    const tryPlay = async () => {
+      try {
+        await el.play();
+        console.log('[WebRTC] Áudio remoto conectado e reproduzindo com sucesso!');
+      } catch (err) {
         console.warn('[WebRTC] Autoplay bloqueado pelo navegador, aguardando clique:', err);
-      });
+      }
     };
 
     tryPlay();
 
-    // Browser gesture fallback: if autoplay was restricted, unlock on user click anywhere
-    window.addEventListener('click', tryPlay, { once: true });
+    // Browser interaction unlock fallback
+    const onUserInteraction = () => {
+      el.play().catch(() => {});
+    };
+    window.addEventListener('click', onUserInteraction, { once: true });
+    window.addEventListener('keydown', onUserInteraction, { once: true });
     return () => {
-      window.removeEventListener('click', tryPlay);
+      window.removeEventListener('click', onUserInteraction);
+      window.removeEventListener('keydown', onUserInteraction);
     };
   }, [stream]);
 
@@ -78,7 +96,22 @@ const RemoteAudioPlayer: React.FC<{
     }
   }, [isDeafened, outputVolume, outputDeviceId]);
 
-  return <audio ref={audioRef} autoPlay playsInline style={{ display: 'none' }} />;
+  return (
+    <audio
+      ref={audioRef}
+      autoPlay
+      playsInline
+      style={{
+        position: 'fixed',
+        top: -9999,
+        left: -9999,
+        width: 1,
+        height: 1,
+        opacity: 0,
+        pointerEvents: 'none',
+      }}
+    />
+  );
 };
 
 interface VoiceRoomOverlayProps {
@@ -122,6 +155,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   const [remoteAudioStreams, setRemoteAudioStreams] = useState<Map<string, MediaStream>>(new Map());
   const [speakingUsers, setSpeakingUsers] = useState<Set<string>>(new Set());
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'idle'>('idle');
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
@@ -155,9 +189,10 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     let pc = peerConnectionsRef.current.get(remoteUserId);
     if (pc) return pc;
 
-    console.log(`[WebRTC] Criando nova RTCPeerConnection para: ${remoteUserId}`);
+    console.log(`[WebRTC] Criando conexão P2P com usuário: ${remoteUserId}`);
     pc = new RTCPeerConnection(RTC_CONFIG);
     peerConnectionsRef.current.set(remoteUserId, pc);
+    setConnectionStatus('connecting');
 
     // Attach local microphone audio track if available
     const activeMic = microphoneStreamRef.current || localMicStream;
@@ -182,6 +217,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         try {
           const sender = pc.addTrack(videoTrack, screenStreamRef.current);
           screenSendersRef.current.set(remoteUserId, sender);
+          console.log(`[WebRTC] Tela local anexada ao peer: ${remoteUserId}`);
         } catch (err) {
           console.warn('[WebRTC] Erro ao anexar tela:', err);
         }
@@ -208,6 +244,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           next.set(remoteUserId, stream);
           return next;
         });
+        setConnectionStatus('connected');
 
         event.track.onended = () => {
           setRemoteAudioStreams((prev) => {
@@ -228,13 +265,18 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
     pc.onconnectionstatechange = () => {
       console.log(`[WebRTC] Estado da conexão com ${remoteUserId}: ${pc?.connectionState}`);
-      if (pc?.connectionState === 'disconnected' || pc?.connectionState === 'failed' || pc?.connectionState === 'closed') {
+      if (pc?.connectionState === 'connected') {
+        setConnectionStatus('connected');
+      } else if (pc?.connectionState === 'disconnected' || pc?.connectionState === 'failed' || pc?.connectionState === 'closed') {
         setRemoteAudioStreams((prev) => {
           if (!prev.has(remoteUserId)) return prev;
           const next = new Map(prev);
           next.delete(remoteUserId);
           return next;
         });
+        if (peerConnectionsRef.current.size <= 1) {
+          setConnectionStatus('idle');
+        }
       }
     };
 
@@ -300,29 +342,31 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     };
   }, [currentUser.id, getOrCreatePeerConnection]);
 
-  // 3. Connect to all peers in this voice room
+  // 3. Connect to all peers in this voice room once microphone is ready
   useEffect(() => {
     const otherMembers = members.filter((m) => m.id !== currentUser.id && !m.id.startsWith('bot-'));
 
-    otherMembers.forEach(async (member) => {
-      // Deterministic tie-breaker: user with higher ID initiates the offer
-      if (currentUser.id > member.id) {
-        const pc = getOrCreatePeerConnection(member.id);
-        if (pc.signalingState === 'stable') {
-          try {
-            console.log(`[WebRTC] Iniciando chamada com ${member.id}`);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('webrtc:signal', {
-              to: member.id,
-              signal: offer,
-            });
-          } catch (err) {
-            console.warn('[WebRTC] Erro ao criar oferta:', err);
+    if (otherMembers.length > 0 && localMicStream) {
+      otherMembers.forEach(async (member) => {
+        // Deterministic tie-breaker: user with higher ID initiates the offer
+        if (currentUser.id > member.id) {
+          const pc = getOrCreatePeerConnection(member.id);
+          if (pc.signalingState === 'stable') {
+            try {
+              console.log(`[WebRTC] Iniciando chamada com ${member.id}`);
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              socket.emit('webrtc:signal', {
+                to: member.id,
+                signal: offer,
+              });
+            } catch (err) {
+              console.warn('[WebRTC] Erro ao criar oferta:', err);
+            }
           }
         }
-      }
-    });
+      });
+    }
 
     // Clean up peers who left
     const currentMemberIds = new Set(members.map((m) => m.id));
@@ -341,7 +385,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         });
       }
     });
-  }, [connectedUsers, channel.id, currentUser.id, getOrCreatePeerConnection]);
+  }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection]);
 
   // 4. Remote Speaking Detection Indicator
   useEffect(() => {
@@ -657,9 +701,24 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           </button>
           <Volume2 size={24} className="text-[#23a55a] flex-shrink-0" />
           <h2 className="text-base sm:text-xl font-bold text-[#f2f3f5] truncate">{channel.name}</h2>
-          <span className="hidden sm:inline-block text-xs bg-[#23a55a]/20 text-[#23a55a] font-bold px-2 py-0.5 rounded whitespace-nowrap">
-            Voz (WebRTC P2P)
-          </span>
+          
+          {/* Connection status badge */}
+          {connectionStatus === 'connected' ? (
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs bg-[#23a55a]/20 text-[#23a55a] font-bold px-2 py-0.5 rounded whitespace-nowrap">
+              <span className="w-2 h-2 rounded-full bg-[#23a55a] animate-pulse" />
+              RTC Conectado (P2P)
+            </span>
+          ) : connectionStatus === 'connecting' ? (
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs bg-[#f0b232]/20 text-[#f0b232] font-bold px-2 py-0.5 rounded whitespace-nowrap">
+              <span className="w-2 h-2 rounded-full bg-[#f0b232] animate-ping" />
+              Conectando Voz...
+            </span>
+          ) : (
+            <span className="hidden sm:inline-flex items-center gap-1 text-xs bg-[#2b2d31] text-[#949ba4] font-semibold px-2 py-0.5 rounded whitespace-nowrap">
+              Sala de Voz
+            </span>
+          )}
+
           {(isScreenSharing || streamingUser) && (
             <span className="bg-[#f23f43] text-white text-[10px] sm:text-xs font-black px-2 py-0.5 rounded uppercase tracking-wider flex items-center gap-1.5 animate-pulse whitespace-nowrap">
               <Radio size={12} /> AO VIVO
@@ -723,7 +782,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                 }}
                 autoPlay
                 playsInline
-                muted={isScreenSharing || currentUser.isDeafened}
+                muted={isScreenSharing}
                 className="w-full h-full object-contain"
               />
             ) : (
