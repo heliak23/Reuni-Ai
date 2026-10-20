@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.env
+.env.local
+
+# Toolkit & Extracted Discord analysis artifacts
+.rea-toolkit/
+extracted_discord/
