@@ -47,17 +47,28 @@ const playNotificationSound = (type: 'message' | 'join' | 'leave') => {
 };
 
 export const App: React.FC = () => {
-  // Current user state
-  const [currentUser, setCurrentUser] = useState<User>({
-    id: `user-${Math.floor(1000 + Math.random() * 9000)}`,
-    username: 'Você',
-    discriminator: '1024',
-    avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&h=100&fit=crop',
-    status: 'online',
-    customStatus: 'Testando Reuni-Ai 🎧',
-    isMuted: false,
-    isDeafened: false,
-    voiceChannelId: null,
+  // Current user state with local persistence
+  const [currentUser, setCurrentUser] = useState<User>(() => {
+    try {
+      const saved = localStorage.getItem('reuni_ai_user');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    const rand = Math.floor(1000 + Math.random() * 9000);
+    const initialUser: User = {
+      id: `user-${Date.now()}-${rand}`,
+      username: `Membro_${rand}`,
+      discriminator: String(rand),
+      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=user_${rand}`,
+      status: 'online',
+      customStatus: 'Online no Reuni-Ai 🎧',
+      isMuted: false,
+      isDeafened: false,
+      voiceChannelId: null,
+    };
+    try {
+      localStorage.setItem('reuni_ai_user', JSON.stringify(initialUser));
+    } catch {}
+    return initialUser;
   });
 
   // Guilds and Channels
@@ -343,6 +354,9 @@ export const App: React.FC = () => {
   const handleUpdateUser = (updated: Partial<User>) => {
     setCurrentUser((prev) => {
       const merged = { ...prev, ...updated };
+      try {
+        localStorage.setItem('reuni_ai_user', JSON.stringify(merged));
+      } catch {}
       socket.emit('user:join', merged);
       return merged;
     });
