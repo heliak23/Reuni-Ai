@@ -549,15 +549,25 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           });
           console.log(`[WebRTC] Enviou Answer para ${from}`);
 
-          // Sync any active video receivers to remoteCameraStreams
-          const offerVideoReceiver = pc.getReceivers().find(
-            (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
-          );
-          if (offerVideoReceiver && offerVideoReceiver.track) {
-            const track = offerVideoReceiver.track;
+          // Sync active video receivers to remoteCameraStreams only if remote peer has video active
+          const offerRemoteUser = members.find((m) => m.id === from);
+          if (offerRemoteUser?.isVideoActive) {
+            const offerVideoReceiver = pc.getReceivers().find(
+              (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
+            );
+            if (offerVideoReceiver && offerVideoReceiver.track) {
+              const track = offerVideoReceiver.track;
+              setRemoteCameraStreams((prev) => {
+                const next = new Map(prev);
+                next.set(from, new MediaStream([track]));
+                return next;
+              });
+            }
+          } else {
             setRemoteCameraStreams((prev) => {
+              if (!prev.has(from)) return prev;
               const next = new Map(prev);
-              next.set(from, new MediaStream([track]));
+              next.delete(from);
               return next;
             });
           }
@@ -573,15 +583,25 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
             }
             pendingCandidatesRef.current.delete(from);
 
-            // Sync any active video receivers to remoteCameraStreams to refresh the player on the offering peer
-            const answerVideoReceiver = pc.getReceivers().find(
-              (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
-            );
-            if (answerVideoReceiver && answerVideoReceiver.track) {
-              const track = answerVideoReceiver.track;
+            // Sync active video receivers to remoteCameraStreams only if remote peer has video active
+            const answerRemoteUser = members.find((m) => m.id === from);
+            if (answerRemoteUser?.isVideoActive) {
+              const answerVideoReceiver = pc.getReceivers().find(
+                (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
+              );
+              if (answerVideoReceiver && answerVideoReceiver.track) {
+                const track = answerVideoReceiver.track;
+                setRemoteCameraStreams((prev) => {
+                  const next = new Map(prev);
+                  next.set(from, new MediaStream([track]));
+                  return next;
+                });
+              }
+            } else {
               setRemoteCameraStreams((prev) => {
+                if (!prev.has(from)) return prev;
                 const next = new Map(prev);
-                next.set(from, new MediaStream([track]));
+                next.delete(from);
                 return next;
               });
             }
@@ -611,7 +631,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     return () => {
       socket.off('webrtc:signal', handleSignal);
     };
-  }, [currentUser.id, getOrCreatePeerConnection]);
+  }, [currentUser.id, getOrCreatePeerConnection, members]);
 
   // 3. Connect to all peers in this voice room once microphone is ready
   useEffect(() => {
@@ -662,6 +682,20 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       }
     });
   }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection, sendOfferToPeer]);
+
+  // 3.1. Synchronize remote camera streams when users toggle their camera off
+  useEffect(() => {
+    connectedUsers.forEach((u) => {
+      if (u.id !== currentUser.id && !u.isVideoActive && remoteCameraStreams.has(u.id)) {
+        setRemoteCameraStreams((prev) => {
+          if (!prev.has(u.id)) return prev;
+          const next = new Map(prev);
+          next.delete(u.id);
+          return next;
+        });
+      }
+    });
+  }, [connectedUsers, currentUser.id, remoteCameraStreams]);
 
   // 4. Remote Speaking Detection Indicator
   useEffect(() => {
@@ -1132,7 +1166,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                   <span className="text-xs font-medium text-[#f2f3f5] whitespace-nowrap">
                     {member.username} {isMe && '(Você)'}
                   </span>
-                  {((isMe && isVideoActive) || remoteCameraStreams.has(member.id)) && (
+                  {((isMe && isVideoActive) || (!isMe && member.isVideoActive)) && (
                     <span className="bg-[#23a55a]/20 text-[#23a55a] p-0.5 rounded-full" title="Câmera Ativa">
                       <Video size={11} />
                     </span>
@@ -1236,7 +1270,9 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                 ? isVideoActive
                   ? cameraStreamRef.current
                   : null
-                : remoteCameraStreams.get(member.id);
+                : member.isVideoActive
+                  ? remoteCameraStreams.get(member.id)
+                  : null;
 
               return (
                 <div
