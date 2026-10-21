@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import type { Channel, User, AudioSettings } from '../types';
+import type { Channel, User, AudioSettings, Message } from '../types';
 import { handleAvatarError } from '../utils/avatar';
 import { socket } from '../socket';
 import {
@@ -21,6 +21,12 @@ import {
   Play,
   Menu,
   Loader2,
+  MessageSquare,
+  Send,
+  ExternalLink,
+  Link as LinkIcon,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 
 const RTC_CONFIG: RTCConfiguration = {
@@ -233,6 +239,8 @@ interface VoiceRoomOverlayProps {
   connectedUsers: User[];
   currentUser: User;
   audioSettings?: AudioSettings;
+  messages?: Message[];
+  onSendMessage?: (content: string) => void;
   onLeaveVoice: () => void;
   onToggleMute: () => void;
   onToggleDeafen: () => void;
@@ -247,6 +255,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   connectedUsers,
   currentUser,
   audioSettings,
+  messages = [],
+  onSendMessage,
   onLeaveVoice,
   onToggleMute,
   onToggleDeafen,
@@ -263,6 +273,58 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   const [streamFps, setStreamFps] = useState<30 | 60>(30);
   const [streamTitle, setStreamTitle] = useState(`${currentUser.username} está transmitindo`);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Voice Room Integrated Text & Link Chat
+  const [chatText, setChatText] = useState('');
+  const [isChatOpen, setIsChatOpen] = useState(true);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isChatOpen && messages && messages.length > 0) {
+      chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isChatOpen]);
+
+  const handleSendVoiceText = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (chatText.trim() && onSendMessage) {
+      onSendMessage(chatText.trim());
+      setChatText('');
+    }
+  };
+
+  const renderMessageContent = (text: string) => {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = text.split(urlRegex);
+
+    return parts.map((part, index) => {
+      if (urlRegex.test(part)) {
+        return (
+          <a
+            key={index}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#5865f2] hover:underline font-semibold inline-flex items-center gap-1 break-all cursor-pointer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {part}
+            <ExternalLink size={12} className="inline flex-shrink-0" />
+          </a>
+        );
+      }
+      return <span key={index}>{part}</span>;
+    });
+  };
+
+  const formatMessageTime = (isoString: string) => {
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return '';
+    }
+  };
 
   // WebRTC mesh state
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
@@ -1365,6 +1427,121 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         </div>
       )}
 
+      {/* Integrated Voice Chat & Link Sharing Section */}
+      <div className="w-full max-w-4xl mx-auto flex flex-col z-20 transition-all duration-300 mt-2 px-1 sm:px-2 flex-shrink-0">
+        {isChatOpen ? (
+          <div className="bg-[var(--bg-card)]/90 backdrop-blur-md rounded-2xl border border-[var(--border-card)] shadow-2xl overflow-hidden flex flex-col transition-all">
+            {/* Chat Header Bar */}
+            <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border-card)] bg-[var(--bg-stage-card-inner)]/50">
+              <div className="flex items-center gap-2">
+                <MessageSquare size={16} className="text-[#5865f2]" />
+                <span className="text-xs sm:text-sm font-bold text-[var(--text-header)]">
+                  Bate-papo da Chamada
+                </span>
+                <span className="bg-[#5865f2]/15 text-[#5865f2] text-[10px] font-extrabold px-1.5 py-0.5 rounded-full">
+                  {messages.length}
+                </span>
+                <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
+                  — Envie mensagens e links em tempo real
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsChatOpen(false)}
+                title="Minimizar Bate-papo"
+                className="p-1 text-[var(--text-muted)] hover:text-[var(--text-header)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors cursor-pointer"
+              >
+                <ChevronDown size={16} />
+              </button>
+            </div>
+
+            {/* Chat Messages Feed */}
+            <div className="max-h-32 sm:max-h-40 overflow-y-auto p-3 space-y-2.5 text-xs sm:text-sm scrollbar-thin">
+              {messages.length === 0 ? (
+                <div className="flex items-center justify-center gap-2 py-4 text-center text-xs text-[var(--text-muted)]">
+                  <LinkIcon size={14} className="text-[var(--text-interactive)]" />
+                  <span>Nenhuma mensagem ainda. Cole um link ou digite algo abaixo para conversar!</span>
+                </div>
+              ) : (
+                messages.map((msg) => {
+                  const isMe = msg.author.id === currentUser.id;
+                  return (
+                    <div key={msg.id} className="flex items-start gap-2.5 group">
+                      <img
+                        src={msg.author.avatar}
+                        alt={msg.author.username}
+                        onError={(e) => handleAvatarError(e, msg.author.id.startsWith('bot'))}
+                        className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-xs text-[var(--text-header)]">
+                            {msg.author.username} {isMe && <span className="font-normal text-[var(--text-muted)]">(Você)</span>}
+                          </span>
+                          <span className="text-[10px] text-[var(--text-muted)]">
+                            {formatMessageTime(msg.timestamp)}
+                          </span>
+                        </div>
+                        <div className="text-[var(--text-normal)] text-xs sm:text-sm break-words whitespace-pre-wrap leading-relaxed mt-0.5 select-text">
+                          {renderMessageContent(msg.content)}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={chatMessagesEndRef} />
+            </div>
+
+            {/* Chat Input Form */}
+            <form
+              onSubmit={handleSendVoiceText}
+              className="p-2 border-t border-[var(--border-card)] bg-[var(--bg-stage-card-inner)] flex items-center gap-2"
+            >
+              <div className="p-1.5 text-[var(--text-muted)] hidden sm:flex items-center">
+                <LinkIcon size={16} />
+              </div>
+              <input
+                type="text"
+                value={chatText}
+                onChange={(e) => setChatText(e.target.value)}
+                placeholder="Enviar mensagem ou link na chamada... (Pressione Enter)"
+                className="flex-1 bg-transparent text-[var(--text-normal)] placeholder-[var(--text-muted)] text-xs sm:text-sm outline-none px-2"
+              />
+              <button
+                type="submit"
+                disabled={!chatText.trim()}
+                title="Enviar mensagem ou link"
+                className={`p-2 rounded-xl transition-all flex items-center justify-center cursor-pointer ${
+                  chatText.trim()
+                    ? 'bg-[#5865f2] hover:bg-[#4752c4] text-white shadow-md scale-105'
+                    : 'text-[var(--text-muted)] opacity-40 cursor-not-allowed'
+                }`}
+              >
+                <Send size={15} />
+              </button>
+            </form>
+          </div>
+        ) : (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={() => setIsChatOpen(true)}
+              className="bg-[var(--bg-card)]/90 hover:bg-[var(--bg-hover)] border border-[var(--border-card)] text-[var(--text-header)] px-4 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2 cursor-pointer shadow-lg transition-all"
+            >
+              <MessageSquare size={14} className="text-[#5865f2]" />
+              <span>Abrir Bate-papo da Chamada</span>
+              {messages.length > 0 && (
+                <span className="bg-[#5865f2] text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
+                  {messages.length}
+                </span>
+              )}
+              <ChevronUp size={14} />
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Voice Controls Bottom Toolbar */}
       <div className="flex items-center justify-center gap-3 bg-[var(--bg-card)]/90 backdrop-blur-md px-6 py-3 rounded-2xl mx-auto z-10 shadow-2xl border border-[var(--border-card)] mt-3 transition-colors">
         {/* Toggle Mute */}
@@ -1426,6 +1603,24 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           <span className="text-sm">
             {isScreenSharing ? 'Parar Transmissão' : 'Compartilhar Tela'}
           </span>
+        </button>
+
+        {/* Toggle Voice Chat */}
+        <button
+          onClick={() => setIsChatOpen(!isChatOpen)}
+          title={isChatOpen ? 'Minimizar Bate-papo' : 'Abrir Bate-papo'}
+          className={`p-3 rounded-full transition-all cursor-pointer relative ${
+            isChatOpen
+              ? 'bg-[#5865f2] text-white hover:bg-[#4752c4]'
+              : 'bg-[var(--bg-hover)] text-[var(--text-header)] hover:bg-[var(--bg-active)]'
+          }`}
+        >
+          <MessageSquare size={22} />
+          {messages.length > 0 && !isChatOpen && (
+            <span className="absolute -top-1 -right-1 bg-[#f23f43] text-white text-[10px] font-extrabold w-4 h-4 rounded-full flex items-center justify-center animate-pulse">
+              {messages.length}
+            </span>
+          )}
         </button>
 
         {/* Disconnect Red Button */}

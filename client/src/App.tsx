@@ -326,6 +326,15 @@ export const App: React.FC = () => {
     socket.emit('stream:stop');
   };
 
+  const handleSendVoiceMessage = (content: string) => {
+    if (!currentVoiceChannel) return;
+    socket.emit('message:send', {
+      channelId: currentVoiceChannel.id,
+      guildId: currentVoiceChannel.guildId || selectedGuildId || '',
+      content,
+    });
+  };
+
   const handleCreateServer = (name: string, iconUrl?: string, password?: string) => {
     const hasPassword = Boolean(password?.trim());
     const newGuild: Guild = {
@@ -419,6 +428,8 @@ export const App: React.FC = () => {
           connectedUsers={onlineUsers}
           currentUser={currentUser}
           audioSettings={audioSettings}
+          messages={messages.filter((m) => m.channelId === currentVoiceChannel.id)}
+          onSendMessage={handleSendVoiceMessage}
           onLeaveVoice={handleLeaveVoice}
           onToggleMute={handleToggleMute}
           onToggleDeafen={handleToggleDeafen}
