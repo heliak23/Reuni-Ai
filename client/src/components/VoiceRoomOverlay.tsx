@@ -114,38 +114,104 @@ const RemoteAudioPlayer: React.FC<{
   );
 };
 
-// Component to render video streams (camera / screen) with robust playback handling
+// Component to render video streams (camera / screen) with robust playback handling, unmute recovery and anti-freeze detection
 const VideoStreamPlayer: React.FC<{
   stream: MediaStream;
   isMuted?: boolean;
   className?: string;
 }> = ({ stream, isMuted = false, className = '' }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const lastTimeRef = useRef<number>(0);
+  const frozenCountRef = useRef<number>(0);
 
   useEffect(() => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el || !stream) return;
 
     if (el.srcObject !== stream) {
       el.srcObject = stream;
     }
 
-    const tryPlay = async () => {
-      try {
-        await el.play();
-      } catch (err) {
-        console.warn('[WebRTC Video] Autoplay aguardando interação:', err);
+    const safePlay = () => {
+      if (el) {
+        el.play().catch(() => {});
       }
     };
 
-    tryPlay();
+    safePlay();
 
+    // 1. Play when metadata is loaded
+    const handleLoadedMetadata = () => {
+      safePlay();
+    };
+    el.addEventListener('loadedmetadata', handleLoadedMetadata);
+
+    // 2. Play and refresh pipeline when tracks unmute (crucial during renegotiation when both turn on camera)
+    const videoTracks = stream.getVideoTracks();
+    const handleUnmute = () => {
+      console.log('[WebRTC Video] Faixa desmutada/reativada, garantindo reprodução contínua...');
+      if (el) {
+        el.srcObject = stream;
+        safePlay();
+      }
+    };
+    videoTracks.forEach((track) => {
+      track.addEventListener('unmute', handleUnmute);
+    });
+
+    // 3. Auto-resume if the browser pauses the video while the stream is still active
+    const handlePause = () => {
+      const hasLiveTrack = stream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled);
+      if (hasLiveTrack && stream.active) {
+        setTimeout(safePlay, 50);
+      }
+    };
+    el.addEventListener('pause', handlePause);
+
+    // 4. Heartbeat: monitors if video currentTime has stalled (frozen video frame) while track is live
+    lastTimeRef.current = el.currentTime;
+    frozenCountRef.current = 0;
+
+    const intervalId = setInterval(() => {
+      if (!el) return;
+      const hasLiveTrack = stream.getVideoTracks().some((t) => t.readyState === 'live' && !t.muted);
+      if (!hasLiveTrack) return;
+
+      if (el.paused) {
+        safePlay();
+        return;
+      }
+
+      // In WebRTC video playback, el.currentTime continuously increments.
+      // If currentTime is frozen across consecutive checks while track is live, kick the video pipeline!
+      if (el.currentTime > 0 && Math.abs(el.currentTime - lastTimeRef.current) < 0.001) {
+        frozenCountRef.current += 1;
+        if (frozenCountRef.current >= 2) {
+          console.log('[WebRTC Video] Quadro congelado detectado (currentTime estático). Reiniciando pipeline...');
+          el.srcObject = stream;
+          safePlay();
+          frozenCountRef.current = 0;
+        }
+      } else {
+        frozenCountRef.current = 0;
+        lastTimeRef.current = el.currentTime;
+      }
+    }, 1000);
+
+    // 5. Browser interaction unlock fallback
     const onUserInteraction = () => {
-      el.play().catch(() => {});
+      safePlay();
     };
     window.addEventListener('click', onUserInteraction, { once: true });
     window.addEventListener('keydown', onUserInteraction, { once: true });
+
     return () => {
+      clearInterval(intervalId);
+      el.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      el.removeEventListener('pause', handlePause);
+      videoTracks.forEach((track) => {
+        track.removeEventListener('unmute', handleUnmute);
+      });
       window.removeEventListener('click', onUserInteraction);
       window.removeEventListener('keydown', onUserInteraction);
     };
@@ -223,6 +289,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   const cameraSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
   const screenSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
   const trackMetadataRef = useRef<Map<string, 'camera' | 'screen'>>(new Map());
+  const initiatedPeersRef = useRef<Set<string>>(new Set());
+  const makingOfferRef = useRef<Map<string, boolean>>(new Map());
 
   // Active members in this voice channel
   const members = connectedUsers.filter((u) => u.voiceChannelId === channel.id);
@@ -233,6 +301,24 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   // Check if anyone is streaming in this room
   const streamingUser = displayMembers.find((m) => m.isStreaming) || (isScreenSharing ? currentUser : null);
   const activeScreenStream = isScreenSharing ? screenStreamRef.current : remoteScreenStream;
+
+  // Helper to send offers with anti-glare flag tracking
+  const sendOfferToPeer = useCallback(async (pc: RTCPeerConnection, peerId: string) => {
+    try {
+      makingOfferRef.current.set(peerId, true);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('webrtc:signal', {
+        to: peerId,
+        signal: offer,
+      });
+      console.log(`[WebRTC] Oferta enviada para ${peerId}`);
+    } catch (err) {
+      console.warn(`[WebRTC] Erro ao criar/enviar oferta para ${peerId}:`, err);
+    } finally {
+      makingOfferRef.current.set(peerId, false);
+    }
+  }, []);
 
   // 1. WebRTC Peer Connection Factory
   const getOrCreatePeerConnection = useCallback((remoteUserId: string): RTCPeerConnection => {
@@ -265,7 +351,20 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       const camTrack = cameraStreamRef.current.getVideoTracks()[0];
       if (camTrack && !cameraSendersRef.current.has(remoteUserId)) {
         try {
-          const sender = pc.addTrack(camTrack, cameraStreamRef.current);
+          const transceivers = pc.getTransceivers();
+          const screenSender = screenSendersRef.current.get(remoteUserId);
+          const cameraTransceiver = transceivers.find(
+            (t) => (t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video') &&
+                   (!screenSender || t.sender !== screenSender)
+          );
+          let sender: RTCRtpSender;
+          if (cameraTransceiver) {
+            cameraTransceiver.direction = 'sendrecv';
+            cameraTransceiver.sender.replaceTrack(camTrack).catch(() => {});
+            sender = cameraTransceiver.sender;
+          } else {
+            sender = pc.addTrack(camTrack, cameraStreamRef.current);
+          }
           cameraSendersRef.current.set(remoteUserId, sender);
           console.log(`[WebRTC] Câmera local anexada ao peer: ${remoteUserId}`);
           socket.emit('webrtc:signal', {
@@ -353,11 +452,22 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           };
         } else {
           console.log(`[WebRTC] Stream de câmera recebido de ${remoteUserId}`);
+          // Always create a new MediaStream reference with the track to guarantee re-render/re-binding
+          const camStream = new MediaStream([event.track]);
           setRemoteCameraStreams((prev) => {
             const next = new Map(prev);
-            next.set(remoteUserId, stream);
+            next.set(remoteUserId, camStream);
             return next;
           });
+
+          event.track.onunmute = () => {
+            console.log(`[WebRTC] Faixa de câmera de ${remoteUserId} disparou onunmute, renovando stream`);
+            setRemoteCameraStreams((prev) => {
+              const next = new Map(prev);
+              next.set(remoteUserId, new MediaStream([event.track]));
+              return next;
+            });
+          };
 
           event.track.onended = () => {
             setRemoteCameraStreams((prev) => {
@@ -412,7 +522,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         } else if (signal.type === 'offer') {
           console.log(`[WebRTC] Recebeu Offer de ${from}`);
           const isPolite = currentUser.id < from;
-          if (pc.signalingState !== 'stable') {
+          const isOfferCollision = makingOfferRef.current.get(from) || pc.signalingState !== 'stable';
+          if (isOfferCollision) {
             if (!isPolite) {
               console.log(`[WebRTC] Glare: ignorando oferta de ${from} (impolite peer)`);
               return;
@@ -422,6 +533,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           }
 
           await pc.setRemoteDescription(new RTCSessionDescription(signal));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
 
           // Flush queued ICE candidates
           const queued = pendingCandidatesRef.current.get(from) || [];
@@ -430,14 +543,24 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           }
           pendingCandidatesRef.current.delete(from);
 
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-
           socket.emit('webrtc:signal', {
             to: from,
             signal: answer,
           });
           console.log(`[WebRTC] Enviou Answer para ${from}`);
+
+          // Sync any active video receivers to remoteCameraStreams
+          const offerVideoReceiver = pc.getReceivers().find(
+            (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
+          );
+          if (offerVideoReceiver && offerVideoReceiver.track) {
+            const track = offerVideoReceiver.track;
+            setRemoteCameraStreams((prev) => {
+              const next = new Map(prev);
+              next.set(from, new MediaStream([track]));
+              return next;
+            });
+          }
         } else if (signal.type === 'answer') {
           console.log(`[WebRTC] Recebeu Answer de ${from}`);
           if (pc.signalingState === 'have-local-offer') {
@@ -449,14 +572,33 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
             }
             pendingCandidatesRef.current.delete(from);
+
+            // Sync any active video receivers to remoteCameraStreams to refresh the player on the offering peer
+            const answerVideoReceiver = pc.getReceivers().find(
+              (r) => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
+            );
+            if (answerVideoReceiver && answerVideoReceiver.track) {
+              const track = answerVideoReceiver.track;
+              setRemoteCameraStreams((prev) => {
+                const next = new Map(prev);
+                next.set(from, new MediaStream([track]));
+                return next;
+              });
+            }
           }
         } else if (signal.type === 'candidate' && signal.candidate) {
-          if (!pc.remoteDescription) {
+          if (!pc.remoteDescription || pc.signalingState !== 'stable') {
             const list = pendingCandidatesRef.current.get(from) || [];
             list.push(signal.candidate);
             pendingCandidatesRef.current.set(from, list);
           } else {
-            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(() => {});
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            } catch (err) {
+              const list = pendingCandidatesRef.current.get(from) || [];
+              list.push(signal.candidate);
+              pendingCandidatesRef.current.set(from, list);
+            }
           }
         }
       } catch (err) {
@@ -477,18 +619,14 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
     if (otherMembers.length > 0 && localMicStream) {
       otherMembers.forEach(async (member) => {
-        // Deterministic tie-breaker: user with higher ID initiates the offer
-        if (currentUser.id > member.id) {
+        // Deterministic tie-breaker: user with higher ID initiates the offer ONLY if not yet initiated
+        if (currentUser.id > member.id && !initiatedPeersRef.current.has(member.id)) {
+          initiatedPeersRef.current.add(member.id);
           const pc = getOrCreatePeerConnection(member.id);
           if (pc.signalingState === 'stable') {
             try {
               console.log(`[WebRTC] Iniciando chamada com ${member.id}`);
-              const offer = await pc.createOffer();
-              await pc.setLocalDescription(offer);
-              socket.emit('webrtc:signal', {
-                to: member.id,
-                signal: offer,
-              });
+              await sendOfferToPeer(pc, member.id);
             } catch (err) {
               console.warn('[WebRTC] Erro ao criar oferta:', err);
             }
@@ -504,9 +642,11 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         console.log(`[WebRTC] Fechando peer desconectado: ${peerId}`);
         pc.close();
         peerConnectionsRef.current.delete(peerId);
+        initiatedPeersRef.current.delete(peerId);
         audioSendersRef.current.delete(peerId);
         cameraSendersRef.current.delete(peerId);
         screenSendersRef.current.delete(peerId);
+        makingOfferRef.current.delete(peerId);
         setRemoteAudioStreams((prev) => {
           if (!prev.has(peerId)) return prev;
           const next = new Map(prev);
@@ -521,7 +661,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         });
       }
     });
-  }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection]);
+  }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection, sendOfferToPeer]);
 
   // 4. Remote Speaking Detection Indicator
   useEffect(() => {
@@ -585,9 +725,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               const sender = pc.addTrack(audioTrack, stream);
               audioSendersRef.current.set(peerId, sender);
               if (pc.signalingState === 'stable') {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                socket.emit('webrtc:signal', { to: peerId, signal: offer });
+                await sendOfferToPeer(pc, peerId);
               }
             } catch (err) {
               console.warn('[WebRTC] Erro ao anexar áudio ao peer existente:', err);
@@ -650,7 +788,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         audioContextRef.current = null;
       }
     };
-  }, [audioSettings?.inputDeviceId]);
+  }, [audioSettings?.inputDeviceId, sendOfferToPeer]);
 
   // 7. Mute Real-Time Handler
   useEffect(() => {
@@ -700,7 +838,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       const videoTrack = stream.getVideoTracks()[0];
 
       // Send screen track to all connected WebRTC peers
-      peerConnectionsRef.current.forEach(async (pc, peerId) => {
+      for (const [peerId, pc] of peerConnectionsRef.current.entries()) {
         try {
           const sender = pc.addTrack(videoTrack, stream);
           screenSendersRef.current.set(peerId, sender);
@@ -716,14 +854,12 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           });
 
           if (pc.signalingState === 'stable') {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+            await sendOfferToPeer(pc, peerId);
           }
         } catch (err) {
           console.warn('[WebRTC] Erro ao transmitir tela para peer:', err);
         }
-      });
+      }
 
       // Browser native banner stop button listener
       videoTrack.onended = () => {
@@ -744,7 +880,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     }
 
     // Remove video track from all peers and renegotiate
-    peerConnectionsRef.current.forEach(async (pc, peerId) => {
+    for (const [peerId, pc] of peerConnectionsRef.current.entries()) {
       const sender = screenSendersRef.current.get(peerId);
       if (sender) {
         try {
@@ -752,15 +888,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           screenSendersRef.current.delete(peerId);
 
           if (pc.signalingState === 'stable') {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+            sendOfferToPeer(pc, peerId);
           }
         } catch (err) {
           console.warn('[WebRTC] Erro ao remover track de tela do peer:', err);
         }
       }
-    });
+    }
 
     setIsScreenSharing(false);
     onStopStream();
@@ -777,18 +911,23 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     // Notify server that our camera is now off
     socket.emit('voice:toggle_video', false);
 
-    // Remove camera sender from all peer connections and renegotiate
+    // Remove or mute camera sender from all peer connections and renegotiate
     peerConnectionsRef.current.forEach(async (pc, peerId) => {
       const sender = cameraSendersRef.current.get(peerId);
       if (sender) {
         try {
-          pc.removeTrack(sender);
+          const transceivers = pc.getTransceivers();
+          const videoTransceiver = transceivers.find((t) => t.sender === sender);
+          if (videoTransceiver) {
+            const isStillReceiving =
+              videoTransceiver.receiver.track && videoTransceiver.receiver.track.readyState === 'live';
+            videoTransceiver.direction = isStillReceiving ? 'recvonly' : 'inactive';
+          }
+          await sender.replaceTrack(null);
           cameraSendersRef.current.delete(peerId);
 
           if (pc.signalingState === 'stable') {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+            await sendOfferToPeer(pc, peerId);
             console.log(`[WebRTC] Câmera removida e oferta enviada para ${peerId}`);
           }
         } catch (err) {
@@ -818,10 +957,27 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         socket.emit('voice:toggle_video', true);
 
         // Attach track to all existing peers and renegotiate
-        peerConnectionsRef.current.forEach(async (pc, peerId) => {
+        for (const [peerId, pc] of peerConnectionsRef.current.entries()) {
           if (videoTrack) {
             try {
-              const sender = pc.addTrack(videoTrack, stream);
+              const transceivers = pc.getTransceivers();
+              const screenSender = screenSendersRef.current.get(peerId);
+              const cameraTransceiver = transceivers.find(
+                (t) => (t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video') &&
+                       (!screenSender || t.sender !== screenSender)
+              );
+
+              let sender: RTCRtpSender;
+              if (cameraTransceiver) {
+                cameraTransceiver.direction = 'sendrecv';
+                await cameraTransceiver.sender.replaceTrack(videoTrack);
+                sender = cameraTransceiver.sender;
+              } else if (cameraSendersRef.current.has(peerId)) {
+                sender = cameraSendersRef.current.get(peerId)!;
+                await sender.replaceTrack(videoTrack);
+              } else {
+                sender = pc.addTrack(videoTrack, stream);
+              }
               cameraSendersRef.current.set(peerId, sender);
 
               socket.emit('webrtc:signal', {
@@ -835,16 +991,14 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               });
 
               if (pc.signalingState === 'stable') {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                socket.emit('webrtc:signal', { to: peerId, signal: offer });
+                await sendOfferToPeer(pc, peerId);
                 console.log(`[WebRTC] Câmera anexada e oferta enviada para ${peerId}`);
               }
             } catch (err) {
               console.warn('[WebRTC] Erro ao anexar câmera ao peer:', err);
             }
           }
-        });
+        }
 
         videoTrack.onended = () => {
           handleTurnOffVideo();
