@@ -384,12 +384,49 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     }
   }, [currentUser.id]);
 
+  // Helper to cleanly dismantle a peer connection immediately
+  const cleanupPeer = useCallback((peerId: string) => {
+    console.log(`[WebRTC] Limpando conexão com peer: ${peerId}`);
+    if (peerRemovalTimersRef.current.has(peerId)) {
+      clearTimeout(peerRemovalTimersRef.current.get(peerId)!);
+      peerRemovalTimersRef.current.delete(peerId);
+    }
+    const pc = peerConnectionsRef.current.get(peerId);
+    if (pc) {
+      try { pc.close(); } catch {}
+      peerConnectionsRef.current.delete(peerId);
+    }
+    initiatedPeersRef.current.delete(peerId);
+    audioSendersRef.current.delete(peerId);
+    cameraSendersRef.current.delete(peerId);
+    screenSendersRef.current.delete(peerId);
+    makingOfferRef.current.delete(peerId);
+    pendingCandidatesRef.current.delete(peerId);
+    setRemoteAudioStreams((prev) => {
+      if (!prev.has(peerId)) return prev;
+      const next = new Map(prev);
+      next.delete(peerId);
+      return next;
+    });
+    setRemoteCameraStreams((prev) => {
+      if (!prev.has(peerId)) return prev;
+      const next = new Map(prev);
+      next.delete(peerId);
+      return next;
+    });
+  }, []);
+
   // 1. WebRTC Peer Connection Factory
   const getOrCreatePeerConnection = useCallback((remoteUserId: string): RTCPeerConnection => {
     let pc = peerConnectionsRef.current.get(remoteUserId);
-    if (pc) return pc;
+    if (pc && pc.signalingState !== 'closed' && pc.connectionState !== 'closed' && pc.connectionState !== 'failed') {
+      return pc;
+    }
+    if (pc) {
+      cleanupPeer(remoteUserId);
+    }
 
-    console.log(`[WebRTC] Criando conexão P2P com usuário: ${remoteUserId}`);
+    console.log(`[WebRTC] Criando conexão P2P nova com usuário: ${remoteUserId}`);
     pc = new RTCPeerConnection(RTC_CONFIG);
     peerConnectionsRef.current.set(remoteUserId, pc);
     setConnectionStatus('connecting');
@@ -597,7 +634,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     };
 
     return pc;
-  }, [currentUser.id, currentUser.isMuted, localMicStream, members]);
+  }, [cleanupPeer, currentUser.id, currentUser.isMuted, localMicStream, members]);
 
   // 2. WebRTC Signaling Listener
   useEffect(() => {
@@ -762,13 +799,16 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
     if (otherMembers.length > 0 && localMicStream) {
       otherMembers.forEach(async (member) => {
-        // Deterministic tie-breaker: user with higher ID initiates the offer ONLY if not yet initiated
-        if (currentUser.id > member.id && !initiatedPeersRef.current.has(member.id)) {
+        const existingPc = peerConnectionsRef.current.get(member.id);
+        const isHealthy = existingPc && existingPc.connectionState === 'connected';
+        if (isHealthy) return;
+
+        if (!initiatedPeersRef.current.has(member.id)) {
           initiatedPeersRef.current.add(member.id);
           const pc = getOrCreatePeerConnection(member.id);
           if (pc.signalingState === 'stable') {
             try {
-              console.log(`[WebRTC] Iniciando chamada com ${member.id}`);
+              console.log(`[WebRTC] Iniciando chamada imediata com ${member.id}`);
               await sendOfferToPeer(pc, member.id);
             } catch (err) {
               console.warn('[WebRTC] Erro ao criar oferta:', err);
@@ -778,7 +818,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       });
     }
 
-    // Clean up peers who left with 5-second grace period
+    // Clean up peers who left
     const currentMemberIds = new Set(members.map((m) => m.id));
 
     // Cancel pending removals for peers who are present
@@ -789,7 +829,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       }
     });
 
-    peerConnectionsRef.current.forEach((pc, peerId) => {
+    peerConnectionsRef.current.forEach((_, peerId) => {
       if (!currentMemberIds.has(peerId)) {
         if (!peerRemovalTimersRef.current.has(peerId)) {
           const timer = setTimeout(() => {
@@ -797,32 +837,54 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
             const stillAbsent = !connectedUsers.some((u) => u.id === peerId && u.voiceChannelId === channel.id);
             if (stillAbsent) {
               console.log(`[WebRTC] Fechando peer desconectado após grace period: ${peerId}`);
-              pc.close();
-              peerConnectionsRef.current.delete(peerId);
-              initiatedPeersRef.current.delete(peerId);
-              audioSendersRef.current.delete(peerId);
-              cameraSendersRef.current.delete(peerId);
-              screenSendersRef.current.delete(peerId);
-              makingOfferRef.current.delete(peerId);
-              setRemoteAudioStreams((prev) => {
-                if (!prev.has(peerId)) return prev;
-                const next = new Map(prev);
-                next.delete(peerId);
-                return next;
-              });
-              setRemoteCameraStreams((prev) => {
-                if (!prev.has(peerId)) return prev;
-                const next = new Map(prev);
-                next.delete(peerId);
-                return next;
-              });
+              cleanupPeer(peerId);
             }
-          }, 5000);
+          }, 2000);
           peerRemovalTimersRef.current.set(peerId, timer);
         }
       }
     });
-  }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection, sendOfferToPeer]);
+  }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection, sendOfferToPeer, cleanupPeer]);
+
+  // 3.1. Immediate reaction when another user explicitly leaves the voice room
+  useEffect(() => {
+    const handleVoiceUserLeft = (data: { userId: string; channelId?: string }) => {
+      if (data.userId !== currentUser.id) {
+        console.log(`[WebRTC] Usuário ${data.userId} saiu da sala de voz. Limpeza imediata.`);
+        cleanupPeer(data.userId);
+      }
+    };
+
+    socket.on('voice:user_left', handleVoiceUserLeft);
+    return () => {
+      socket.off('voice:user_left', handleVoiceUserLeft);
+    };
+  }, [cleanupPeer, currentUser.id]);
+
+  // 3.2. Immediate reaction when a user joins or re-enters the voice room
+  useEffect(() => {
+    const handleVoiceUserJoined = async (data: { userId: string; channelId: string }) => {
+      if (data.userId === currentUser.id || data.channelId !== channel.id) return;
+      console.log(`[WebRTC] Usuário ${data.userId} acabou de entrar na sala. Estabelecendo handshake imediato...`);
+      // Clean up any stale peer connection from their previous session
+      cleanupPeer(data.userId);
+
+      const activeMic = microphoneStreamRef.current || localMicStream;
+      if (activeMic) {
+        initiatedPeersRef.current.add(data.userId);
+        const pc = getOrCreatePeerConnection(data.userId);
+        if (pc.signalingState === 'stable') {
+          console.log(`[WebRTC] Enviando oferta imediata para quem acabou de entrar: ${data.userId}`);
+          await sendOfferToPeer(pc, data.userId);
+        }
+      }
+    };
+
+    socket.on('voice:user_joined', handleVoiceUserJoined);
+    return () => {
+      socket.off('voice:user_joined', handleVoiceUserJoined);
+    };
+  }, [channel.id, cleanupPeer, currentUser.id, getOrCreatePeerConnection, localMicStream, sendOfferToPeer]);
 
   // 3.1. Synchronize remote camera streams when users toggle their camera off
   useEffect(() => {

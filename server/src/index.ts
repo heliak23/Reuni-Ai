@@ -349,12 +349,18 @@ io.on('connection', (socket: Socket) => {
       isMuted: session.user.isMuted,
       isDeafened: session.user.isDeafened,
     });
+    // Immediately notify all room participants of the joined user for instant WebRTC handshake
+    io.emit('voice:user_joined', {
+      userId: session.user.id,
+      channelId,
+    });
   });
 
   socket.on('voice:leave', () => {
     const session = connectedUsers.get(socket.id);
     if (!session) return;
 
+    const prevVoiceChannelId = session.user.voiceChannelId;
     session.user.voiceChannelId = null;
     session.user.isStreaming = false;
     session.user.streamTitle = undefined;
@@ -365,6 +371,12 @@ io.on('connection', (socket: Socket) => {
       isStreaming: false,
       isVideoActive: false,
     });
+    if (prevVoiceChannelId) {
+      io.emit('voice:user_left', {
+        userId: session.user.id,
+        channelId: prevVoiceChannelId,
+      });
+    }
   });
 
   socket.on('voice:toggle_video', (isActive: boolean) => {
@@ -515,6 +527,10 @@ io.on('connection', (socket: Socket) => {
             console.log(`[Socket] Desconexão definitiva do usuário: ${session.user.username}`);
             io.emit('presence:remove', userId);
             if (session.user.voiceChannelId) {
+              io.emit('voice:user_left', {
+                userId,
+                channelId: session.user.voiceChannelId,
+              });
               io.emit('voice:state_update', {
                 userId,
                 voiceChannelId: null,
