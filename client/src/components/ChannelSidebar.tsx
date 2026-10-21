@@ -124,9 +124,13 @@ export const ChannelSidebar: React.FC<ChannelSidebarProps> = ({
                 <div className="space-y-[2px]">
                   {voiceChannels.map((channel) => {
                     const isConnected = currentVoiceChannel?.id === channel.id;
-                    const membersInChannel = connectedUsers.filter(
+                    const rawMembersInChannel = connectedUsers.filter(
                       (u) => u.voiceChannelId === channel.id
                     );
+                    const membersInChannel =
+                      isConnected && !rawMembersInChannel.some((m) => m.id === currentUser.id)
+                        ? [{ ...currentUser, voiceChannelId: channel.id }, ...rawMembersInChannel]
+                        : rawMembersInChannel;
 
                     return (
                       <div key={channel.id} className="flex flex-col">

@@ -159,6 +159,8 @@ let messages: Message[] = [
 
 // Active users map
 const connectedUsers = new Map<string, { socketId: string; user: User }>();
+// Pending disconnect timeouts map to prevent instant drop during transient reconnections
+const pendingDisconnects = new Map<string, NodeJS.Timeout>();
 // Typing users tracking: channelId -> Set of usernames
 const typingStatus = new Map<string, Set<string>>();
 
@@ -167,16 +169,38 @@ io.on('connection', (socket: Socket) => {
 
   // Handle user identification
   socket.on('user:join', (userData: Partial<User>) => {
+    // If there was a pending disconnect for this user, cancel it immediately!
+    const targetUserId = userData.id || `user-${socket.id.slice(0, 6)}`;
+    if (pendingDisconnects.has(targetUserId)) {
+      clearTimeout(pendingDisconnects.get(targetUserId)!);
+      pendingDisconnects.delete(targetUserId);
+    }
+
+    // Check if user already had an active session to preserve voiceChannelId and media state
+    const previousSession = Array.from(connectedUsers.values()).find((s) => s.user.id === targetUserId);
+    const voiceChannelId = userData.voiceChannelId !== undefined
+      ? userData.voiceChannelId
+      : (previousSession?.user.voiceChannelId || null);
+    const isVideoActive = userData.isVideoActive !== undefined
+      ? userData.isVideoActive
+      : (previousSession?.user.isVideoActive || false);
+    const isStreaming = userData.isStreaming !== undefined
+      ? userData.isStreaming
+      : (previousSession?.user.isStreaming || false);
+
     const user: User = {
-      id: userData.id || `user-${socket.id.slice(0, 6)}`,
-      username: userData.username || `Viajante_${Math.floor(1000 + Math.random() * 9000)}`,
-      discriminator: userData.discriminator || String(Math.floor(1000 + Math.random() * 9000)),
-      avatar: userData.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${socket.id}`,
+      id: targetUserId,
+      username: userData.username || previousSession?.user.username || `Viajante_${Math.floor(1000 + Math.random() * 9000)}`,
+      discriminator: userData.discriminator || previousSession?.user.discriminator || String(Math.floor(1000 + Math.random() * 9000)),
+      avatar: userData.avatar || previousSession?.user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${socket.id}`,
       status: userData.status || 'online',
-      customStatus: userData.customStatus || 'Online no Reuni-Ai',
-      voiceChannelId: null,
-      isMuted: false,
-      isDeafened: false,
+      customStatus: userData.customStatus || previousSession?.user.customStatus || 'Online no Reuni-Ai',
+      voiceChannelId,
+      isMuted: userData.isMuted ?? previousSession?.user.isMuted ?? false,
+      isDeafened: userData.isDeafened ?? previousSession?.user.isDeafened ?? false,
+      isStreaming,
+      isVideoActive,
+      streamTitle: userData.streamTitle ?? previousSession?.user.streamTitle,
     };
 
     // Clean up any old session with the same user ID to prevent ghost sockets
@@ -199,6 +223,19 @@ io.on('connection', (socket: Socket) => {
 
     // Broadcast user presence to everyone else
     socket.broadcast.emit('presence:update', user);
+
+    // If user was already in a voice channel, reaffirm voice state to the room
+    if (user.voiceChannelId) {
+      io.emit('voice:state_update', {
+        userId: user.id,
+        voiceChannelId: user.voiceChannelId,
+        isMuted: user.isMuted,
+        isDeafened: user.isDeafened,
+        isStreaming: user.isStreaming,
+        isVideoActive: user.isVideoActive,
+        streamTitle: user.streamTitle,
+      });
+    }
   });
 
   // Handle message creation
@@ -437,10 +474,8 @@ io.on('connection', (socket: Socket) => {
   // WebRTC Signaling for multi-user voice audio
   socket.on('webrtc:signal', (data: { to: string; signal: any; from?: string }) => {
     const sender = connectedUsers.get(socket.id)?.user;
-    const senderId = sender?.id || data.from;
+    const senderId = data.from || sender?.id;
     if (!senderId || !data.to) return;
-
-    console.log(`[WebRTC Signal] De ${sender?.username || senderId} para ${data.to} (${data.signal?.type || 'candidate'})`);
 
     // Emit to target user's personal room
     io.to(`user:${data.to}`).emit('webrtc:signal', {
@@ -459,13 +494,39 @@ io.on('connection', (socket: Socket) => {
     }
   });
 
-  // Disconnection
+  // Disconnection with 4-second grace period for quick network reconnections
   socket.on('disconnect', () => {
     const session = connectedUsers.get(socket.id);
     if (session) {
-      console.log(`[Socket] Desconectado: ${session.user.username}`);
-      io.emit('presence:remove', session.user.id);
+      const userId = session.user.id;
       connectedUsers.delete(socket.id);
+
+      // Check if user has another active socket session right now
+      const stillHasSocket = Array.from(connectedUsers.values()).some((s) => s.user.id === userId);
+      if (!stillHasSocket) {
+        if (pendingDisconnects.has(userId)) {
+          clearTimeout(pendingDisconnects.get(userId)!);
+        }
+
+        const timeout = setTimeout(() => {
+          pendingDisconnects.delete(userId);
+          const active = Array.from(connectedUsers.values()).some((s) => s.user.id === userId);
+          if (!active) {
+            console.log(`[Socket] Desconexão definitiva do usuário: ${session.user.username}`);
+            io.emit('presence:remove', userId);
+            if (session.user.voiceChannelId) {
+              io.emit('voice:state_update', {
+                userId,
+                voiceChannelId: null,
+                isStreaming: false,
+                isVideoActive: false,
+              });
+            }
+          }
+        }, 4000);
+
+        pendingDisconnects.set(userId, timeout);
+      }
     }
   });
 });

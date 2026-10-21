@@ -353,12 +353,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   const trackMetadataRef = useRef<Map<string, 'camera' | 'screen'>>(new Map());
   const initiatedPeersRef = useRef<Set<string>>(new Set());
   const makingOfferRef = useRef<Map<string, boolean>>(new Map());
+  const peerRemovalTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Active members in this voice channel
   const members = connectedUsers.filter((u) => u.voiceChannelId === channel.id);
   const displayMembers = members.some((m) => m.id === currentUser.id)
     ? members
-    : [currentUser, ...members];
+    : [{ ...currentUser, voiceChannelId: channel.id }, ...members];
 
   // Check if anyone is streaming in this room
   const streamingUser = displayMembers.find((m) => m.isStreaming) || (isScreenSharing ? currentUser : null);
@@ -372,6 +373,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       await pc.setLocalDescription(offer);
       socket.emit('webrtc:signal', {
         to: peerId,
+        from: currentUser.id,
         signal: offer,
       });
       console.log(`[WebRTC] Oferta enviada para ${peerId}`);
@@ -380,7 +382,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     } finally {
       makingOfferRef.current.set(peerId, false);
     }
-  }, []);
+  }, [currentUser.id]);
 
   // 1. WebRTC Peer Connection Factory
   const getOrCreatePeerConnection = useCallback((remoteUserId: string): RTCPeerConnection => {
@@ -431,6 +433,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           console.log(`[WebRTC] Câmera local anexada ao peer: ${remoteUserId}`);
           socket.emit('webrtc:signal', {
             to: remoteUserId,
+            from: currentUser.id,
             signal: {
               type: 'track_metadata',
               trackId: camTrack.id,
@@ -454,6 +457,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           console.log(`[WebRTC] Tela local anexada ao peer: ${remoteUserId}`);
           socket.emit('webrtc:signal', {
             to: remoteUserId,
+            from: currentUser.id,
             signal: {
               type: 'track_metadata',
               trackId: videoTrack.id,
@@ -472,6 +476,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       if (event.candidate) {
         socket.emit('webrtc:signal', {
           to: remoteUserId,
+          from: currentUser.id,
           signal: { type: 'candidate', candidate: event.candidate },
         });
       }
@@ -490,12 +495,18 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         setConnectionStatus('connected');
 
         event.track.onended = () => {
-          setRemoteAudioStreams((prev) => {
-            if (!prev.has(remoteUserId)) return prev;
-            const next = new Map(prev);
-            next.delete(remoteUserId);
-            return next;
-          });
+          // Verify if there are other audio receivers still live before removing
+          const hasOtherLiveAudio = pc.getReceivers().some(
+            (r) => r.track && r.track.kind === 'audio' && r.track.id !== event.track.id && r.track.readyState === 'live'
+          );
+          if (!hasOtherLiveAudio) {
+            setRemoteAudioStreams((prev) => {
+              if (!prev.has(remoteUserId)) return prev;
+              const next = new Map(prev);
+              next.delete(remoteUserId);
+              return next;
+            });
+          }
         };
       } else if (event.track.kind === 'video') {
         const stream = event.streams[0] || new MediaStream([event.track]);
@@ -547,7 +558,26 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       console.log(`[WebRTC] Estado da conexão com ${remoteUserId}: ${pc?.connectionState}`);
       if (pc?.connectionState === 'connected') {
         setConnectionStatus('connected');
-      } else if (pc?.connectionState === 'disconnected' || pc?.connectionState === 'failed' || pc?.connectionState === 'closed') {
+      } else if (pc?.connectionState === 'failed') {
+        console.warn(`[WebRTC] Conexão com ${remoteUserId} falhou, tentando ICE restart...`);
+        try {
+          pc.restartIce();
+          pc.createOffer({ iceRestart: true }).then((offer) => {
+            pc.setLocalDescription(offer);
+            socket.emit('webrtc:signal', {
+              to: remoteUserId,
+              from: currentUser.id,
+              signal: offer,
+            });
+          }).catch((err) => {
+            console.warn('[WebRTC] Erro no ICE restart:', err);
+          });
+        } catch (err) {
+          console.warn('[WebRTC] Falha ao invocar ICE restart:', err);
+        }
+      } else if (pc?.connectionState === 'disconnected') {
+        console.warn(`[WebRTC] Conexão com ${remoteUserId} temporariamente desconectada`);
+      } else if (pc?.connectionState === 'closed') {
         setRemoteAudioStreams((prev) => {
           if (!prev.has(remoteUserId)) return prev;
           const next = new Map(prev);
@@ -567,7 +597,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     };
 
     return pc;
-  }, [currentUser.isMuted, localMicStream, members]);
+  }, [currentUser.id, currentUser.isMuted, localMicStream, members]);
 
   // 2. WebRTC Signaling Listener
   useEffect(() => {
@@ -607,9 +637,25 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
           socket.emit('webrtc:signal', {
             to: from,
+            from: currentUser.id,
             signal: answer,
           });
           console.log(`[WebRTC] Enviou Answer para ${from}`);
+
+          // Always synchronize audio receiver to remoteAudioStreams to prevent audio drops on renegotiation
+          const offerAudioReceiver = pc.getReceivers().find(
+            (r) => r.track && r.track.kind === 'audio' && r.track.readyState === 'live'
+          );
+          if (offerAudioReceiver && offerAudioReceiver.track) {
+            const track = offerAudioReceiver.track;
+            setRemoteAudioStreams((prev) => {
+              if (prev.has(from) && prev.get(from)!.getAudioTracks()[0]?.id === track.id) return prev;
+              const next = new Map(prev);
+              next.set(from, new MediaStream([track]));
+              return next;
+            });
+            setConnectionStatus('connected');
+          }
 
           // Sync active video receivers to remoteCameraStreams only if remote peer has video active
           const offerRemoteUser = members.find((m) => m.id === from);
@@ -644,6 +690,21 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
             }
             pendingCandidatesRef.current.delete(from);
+
+            // Always synchronize audio receiver to remoteAudioStreams to prevent audio drops on renegotiation
+            const answerAudioReceiver = pc.getReceivers().find(
+              (r) => r.track && r.track.kind === 'audio' && r.track.readyState === 'live'
+            );
+            if (answerAudioReceiver && answerAudioReceiver.track) {
+              const track = answerAudioReceiver.track;
+              setRemoteAudioStreams((prev) => {
+                if (prev.has(from) && prev.get(from)!.getAudioTracks()[0]?.id === track.id) return prev;
+                const next = new Map(prev);
+                next.set(from, new MediaStream([track]));
+                return next;
+              });
+              setConnectionStatus('connected');
+            }
 
             // Sync active video receivers to remoteCameraStreams only if remote peer has video active
             const answerRemoteUser = members.find((m) => m.id === from);
@@ -717,30 +778,48 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       });
     }
 
-    // Clean up peers who left
+    // Clean up peers who left with 5-second grace period
     const currentMemberIds = new Set(members.map((m) => m.id));
+
+    // Cancel pending removals for peers who are present
+    currentMemberIds.forEach((id) => {
+      if (peerRemovalTimersRef.current.has(id)) {
+        clearTimeout(peerRemovalTimersRef.current.get(id)!);
+        peerRemovalTimersRef.current.delete(id);
+      }
+    });
+
     peerConnectionsRef.current.forEach((pc, peerId) => {
       if (!currentMemberIds.has(peerId)) {
-        console.log(`[WebRTC] Fechando peer desconectado: ${peerId}`);
-        pc.close();
-        peerConnectionsRef.current.delete(peerId);
-        initiatedPeersRef.current.delete(peerId);
-        audioSendersRef.current.delete(peerId);
-        cameraSendersRef.current.delete(peerId);
-        screenSendersRef.current.delete(peerId);
-        makingOfferRef.current.delete(peerId);
-        setRemoteAudioStreams((prev) => {
-          if (!prev.has(peerId)) return prev;
-          const next = new Map(prev);
-          next.delete(peerId);
-          return next;
-        });
-        setRemoteCameraStreams((prev) => {
-          if (!prev.has(peerId)) return prev;
-          const next = new Map(prev);
-          next.delete(peerId);
-          return next;
-        });
+        if (!peerRemovalTimersRef.current.has(peerId)) {
+          const timer = setTimeout(() => {
+            peerRemovalTimersRef.current.delete(peerId);
+            const stillAbsent = !connectedUsers.some((u) => u.id === peerId && u.voiceChannelId === channel.id);
+            if (stillAbsent) {
+              console.log(`[WebRTC] Fechando peer desconectado após grace period: ${peerId}`);
+              pc.close();
+              peerConnectionsRef.current.delete(peerId);
+              initiatedPeersRef.current.delete(peerId);
+              audioSendersRef.current.delete(peerId);
+              cameraSendersRef.current.delete(peerId);
+              screenSendersRef.current.delete(peerId);
+              makingOfferRef.current.delete(peerId);
+              setRemoteAudioStreams((prev) => {
+                if (!prev.has(peerId)) return prev;
+                const next = new Map(prev);
+                next.delete(peerId);
+                return next;
+              });
+              setRemoteCameraStreams((prev) => {
+                if (!prev.has(peerId)) return prev;
+                const next = new Map(prev);
+                next.delete(peerId);
+                return next;
+              });
+            }
+          }, 5000);
+          peerRemovalTimersRef.current.set(peerId, timer);
+        }
       }
     });
   }, [connectedUsers, channel.id, currentUser.id, localMicStream, getOrCreatePeerConnection, sendOfferToPeer]);
@@ -941,6 +1020,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
           socket.emit('webrtc:signal', {
             to: peerId,
+            from: currentUser.id,
             signal: {
               type: 'track_metadata',
               trackId: videoTrack.id,
@@ -1078,6 +1158,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
               socket.emit('webrtc:signal', {
                 to: peerId,
+                from: currentUser.id,
                 signal: {
                   type: 'track_metadata',
                   trackId: videoTrack.id,
@@ -1137,6 +1218,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       cameraSendersRef.current.clear();
       screenSendersRef.current.clear();
       trackMetadataRef.current.clear();
+      peerRemovalTimersRef.current.forEach((t) => clearTimeout(t));
+      peerRemovalTimersRef.current.clear();
       setRemoteAudioStreams(new Map());
       setRemoteCameraStreams(new Map());
     };

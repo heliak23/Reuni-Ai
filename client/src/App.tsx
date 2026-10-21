@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { Guild, Channel, Message, User, AudioSettings } from './types';
 import { socket } from './socket';
 import { ServerSidebar } from './components/ServerSidebar';
@@ -122,17 +122,50 @@ export const App: React.FC = () => {
     localStorage.setItem('reuni_ai_audio', JSON.stringify(newSettings));
   };
 
+  const currentUserRef = useRef<User>(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  const currentVoiceChannelRef = useRef<Channel | null>(currentVoiceChannel);
+  useEffect(() => {
+    currentVoiceChannelRef.current = currentVoiceChannel;
+  }, [currentVoiceChannel]);
+
   // Connect to Socket server and setup listeners
   useEffect(() => {
-    socket.connect();
+    const handleConnect = () => {
+      console.log('[Socket] Conectado/Reconectado ao servidor Socket.IO');
+      const payload: Partial<User> = {
+        ...currentUserRef.current,
+        voiceChannelId: currentVoiceChannelRef.current?.id || null,
+      };
+      socket.emit('user:join', payload);
+      if (currentVoiceChannelRef.current) {
+        socket.emit('voice:join', currentVoiceChannelRef.current.id);
+      }
+    };
 
-    // Register user
-    socket.emit('user:join', currentUser);
+    socket.on('connect', handleConnect);
+    if (socket.connected) {
+      handleConnect();
+    } else {
+      socket.connect();
+    }
 
     socket.on('ready', (data: { self: User; guilds: Guild[]; messages: Message[]; onlineUsers: User[] }) => {
       setGuilds(data.guilds);
       setMessages(data.messages);
-      setOnlineUsers(data.onlineUsers);
+      
+      const myId = currentUserRef.current.id;
+      const meInOnline = data.onlineUsers.find((u) => u.id === myId);
+      const activeVoiceId = currentVoiceChannelRef.current?.id || null;
+      const mergedMe: User = {
+        ...(meInOnline || currentUserRef.current),
+        voiceChannelId: activeVoiceId ?? meInOnline?.voiceChannelId ?? null,
+      };
+      const others = data.onlineUsers.filter((u) => u.id !== myId);
+      setOnlineUsers([mergedMe, ...others]);
 
       // Default select first channel of first guild
       if (data.guilds.length > 0 && data.guilds[0].channels.length > 0) {
@@ -164,6 +197,8 @@ export const App: React.FC = () => {
     });
 
     socket.on('presence:remove', (userId: string) => {
+      // Do not remove self from local online list if presence:remove was emitted during socket reconnect
+      if (userId === currentUserRef.current.id) return;
       setOnlineUsers((prev) => prev.filter((u) => u.id !== userId));
     });
 
@@ -175,23 +210,48 @@ export const App: React.FC = () => {
     });
 
     socket.on('voice:state_update', (data: { userId: string; voiceChannelId: string | null; isMuted?: boolean; isDeafened?: boolean; isStreaming?: boolean; streamTitle?: string; isVideoActive?: boolean }) => {
-      setOnlineUsers((prev) =>
-        prev.map((u) =>
-          u.id === data.userId
-            ? {
-                ...u,
-                voiceChannelId: data.voiceChannelId,
-                isMuted: data.isMuted !== undefined ? data.isMuted : u.isMuted,
-                isDeafened: data.isDeafened !== undefined ? data.isDeafened : u.isDeafened,
-                isStreaming: data.isStreaming !== undefined ? data.isStreaming : u.isStreaming,
-                streamTitle: data.streamTitle !== undefined ? data.streamTitle : u.streamTitle,
-                isVideoActive: data.isVideoActive !== undefined ? data.isVideoActive : u.isVideoActive,
-              }
-            : u
-        )
-      );
+      setOnlineUsers((prev) => {
+        const exists = prev.some((u) => u.id === data.userId);
+        if (exists) {
+          return prev.map((u) =>
+            u.id === data.userId
+              ? {
+                  ...u,
+                  voiceChannelId: data.voiceChannelId,
+                  isMuted: data.isMuted !== undefined ? data.isMuted : u.isMuted,
+                  isDeafened: data.isDeafened !== undefined ? data.isDeafened : u.isDeafened,
+                  isStreaming: data.isStreaming !== undefined ? data.isStreaming : u.isStreaming,
+                  streamTitle: data.streamTitle !== undefined ? data.streamTitle : u.streamTitle,
+                  isVideoActive: data.isVideoActive !== undefined ? data.isVideoActive : u.isVideoActive,
+                }
+              : u
+          );
+        } else {
+          const fallbackUser: User = data.userId === currentUserRef.current.id
+            ? currentUserRef.current
+            : {
+                id: data.userId,
+                username: `Membro`,
+                discriminator: '0000',
+                avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${data.userId}`,
+                status: 'online' as const,
+              };
+          return [
+            ...prev,
+            {
+              ...fallbackUser,
+              voiceChannelId: data.voiceChannelId,
+              isMuted: data.isMuted,
+              isDeafened: data.isDeafened,
+              isStreaming: data.isStreaming,
+              streamTitle: data.streamTitle,
+              isVideoActive: data.isVideoActive,
+            },
+          ];
+        }
+      });
 
-      if (data.userId === currentUser.id) {
+      if (data.userId === currentUserRef.current.id) {
         setCurrentUser((prev) => ({
           ...prev,
           voiceChannelId: data.voiceChannelId,
@@ -205,6 +265,7 @@ export const App: React.FC = () => {
     });
 
     return () => {
+      socket.off('connect', handleConnect);
       socket.off('ready');
       socket.off('message:new');
       socket.off('message:reaction_update');
@@ -285,6 +346,12 @@ export const App: React.FC = () => {
   const handleJoinVoice = (channel: Channel) => {
     setCurrentVoiceChannel(channel);
     setIsVoiceOverlayOpen(true);
+    const updatedUser: User = { ...currentUser, voiceChannelId: channel.id };
+    setCurrentUser(updatedUser);
+    setOnlineUsers((prev) => {
+      const filtered = prev.filter((u) => u.id !== currentUser.id);
+      return [{ ...updatedUser }, ...filtered];
+    });
     socket.emit('voice:join', channel.id);
     playNotificationSound('join');
   };
@@ -292,6 +359,17 @@ export const App: React.FC = () => {
   const handleLeaveVoice = () => {
     setCurrentVoiceChannel(null);
     setIsVoiceOverlayOpen(false);
+    const updatedUser: User = {
+      ...currentUser,
+      voiceChannelId: null,
+      isStreaming: false,
+      isVideoActive: false,
+    };
+    setCurrentUser(updatedUser);
+    setOnlineUsers((prev) => {
+      const filtered = prev.filter((u) => u.id !== currentUser.id);
+      return [{ ...updatedUser }, ...filtered];
+    });
     socket.emit('voice:leave');
     playNotificationSound('leave');
   };
