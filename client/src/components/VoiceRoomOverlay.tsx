@@ -1083,7 +1083,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   return (
     <div
       ref={stageContainerRef}
-      className="flex-1 h-full bg-[#111214] flex flex-col justify-between p-4 sm:p-6 select-none relative overflow-hidden"
+      className="flex-1 h-full bg-[var(--bg-stage)] flex flex-col justify-between p-4 sm:p-6 select-none relative overflow-hidden transition-colors"
     >
       {/* Hidden DOM Remote Audio Players: guarantees browser autoplay works reliably */}
       {Array.from(remoteAudioStreams.entries()).map(([peerId, stream]) => (
@@ -1101,13 +1101,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         <div className="flex items-center gap-2 truncate min-w-0">
           <button
             onClick={onOpenMobileMenu}
-            className="md:hidden p-1.5 -ml-1 text-[var(--text-interactive)] hover:text-[var(--text-header)] hover:bg-[#2b2d31] rounded transition-colors cursor-pointer flex-shrink-0"
+            className="md:hidden p-1.5 -ml-1 text-[var(--text-interactive)] hover:text-[var(--text-header)] hover:bg-[var(--bg-hover)] rounded transition-colors cursor-pointer flex-shrink-0"
             title="Abrir Canais"
           >
             <Menu size={20} />
           </button>
           <Volume2 size={24} className="text-[#23a55a] flex-shrink-0" />
-          <h2 className="text-base sm:text-xl font-bold text-[#f2f3f5] truncate">{channel.name}</h2>
+          <h2 className="text-base sm:text-xl font-bold text-[var(--text-header)] truncate">{channel.name}</h2>
           
           {/* Connection status badge */}
           {connectionStatus === 'connected' ? (
@@ -1121,7 +1121,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               Conectando Voz...
             </span>
           ) : (
-            <span className="hidden sm:inline-flex items-center gap-1 text-xs bg-[#2b2d31] text-[#949ba4] font-semibold px-2 py-0.5 rounded whitespace-nowrap">
+            <span className="hidden sm:inline-flex items-center gap-1 text-xs bg-[var(--bg-hover)] text-[var(--text-muted)] border border-[var(--border-subtle)] font-semibold px-2 py-0.5 rounded whitespace-nowrap">
               Sala de Voz
             </span>
           )}
@@ -1132,7 +1132,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 text-xs sm:text-sm text-[#949ba4] flex-shrink-0">
+        <div className="flex items-center gap-2 text-xs sm:text-sm text-[var(--text-muted)] flex-shrink-0">
           <Users size={16} />
           <span>{displayMembers.length} <span className="hidden sm:inline">Conectados</span></span>
         </div>
@@ -1151,10 +1151,10 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               return (
                 <div
                   key={member.id}
-                  className={`flex items-center gap-2 bg-[#2b2d31]/80 backdrop-blur px-3 py-1.5 rounded-full border transition-all ${
+                  className={`flex items-center gap-2 bg-[var(--bg-stage-card)]/90 backdrop-blur px-3 py-1.5 rounded-full border transition-all ${
                     speaking
                       ? 'border-[#23a55a] shadow-[0_0_12px_rgba(35,165,90,0.5)]'
-                      : 'border-transparent'
+                      : 'border-[var(--border-stage)]'
                   }`}
                 >
                   <img
@@ -1163,7 +1163,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                     onError={(e) => handleAvatarError(e, member.id.startsWith('bot'))}
                     className="w-6 h-6 rounded-full object-cover"
                   />
-                  <span className="text-xs font-medium text-[#f2f3f5] whitespace-nowrap">
+                  <span className="text-xs font-medium text-[var(--text-header)] whitespace-nowrap">
                     {member.username} {isMe && '(Você)'}
                   </span>
                   {((isMe && isVideoActive) || (!isMe && member.isVideoActive)) && (
@@ -1277,10 +1277,10 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
               return (
                 <div
                   key={member.id}
-                  className={`relative bg-[#2b2d31] rounded-2xl overflow-hidden transition-all duration-200 border-2 shadow-xl flex flex-col ${
+                  className={`relative bg-[var(--bg-stage-card)] rounded-2xl overflow-hidden transition-all duration-200 border-2 shadow-xl flex flex-col ${
                     speaking
                       ? 'border-[#23a55a] shadow-[0_0_24px_rgba(35,165,90,0.45)] scale-[1.01]'
-                      : 'border-[#1e1f22]'
+                      : 'border-[var(--border-stage)]'
                   }`}
                 >
                   {/* Video Tile or Avatar Tile */}
@@ -1323,7 +1323,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <div className="w-full aspect-video bg-[#232428] flex flex-col items-center justify-center p-6 relative">
+                    <div className="w-full aspect-video bg-[var(--bg-stage-card-inner)] flex flex-col items-center justify-center p-6 relative transition-colors">
                       <div className="relative mb-3">
                         <img
                           src={member.avatar}
@@ -1336,7 +1336,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                           }`}
                         />
                         <div
-                          className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#2b2d31] ${
+                          className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[var(--bg-stage-card)] ${
                             member.status === 'online'
                               ? 'bg-[#23a55a]'
                               : member.status === 'idle'
@@ -1347,13 +1347,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-base text-[#f2f3f5] truncate max-w-[200px]">
+                        <span className="font-bold text-base text-[var(--text-header)] truncate max-w-[200px]">
                           {member.username} {isMe && '(Você)'}
                         </span>
                         {member.isMuted && <MicOff size={16} className="text-[#f23f43] flex-shrink-0" />}
                       </div>
 
-                      <span className="text-xs text-[#949ba4] mt-1">
+                      <span className="text-xs text-[var(--text-muted)] mt-1">
                         {speaking ? 'Falando...' : member.customStatus || 'Conectado'}
                       </span>
                     </div>
@@ -1366,7 +1366,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       )}
 
       {/* Voice Controls Bottom Toolbar */}
-      <div className="flex items-center justify-center gap-3 bg-[#2b2d31]/90 backdrop-blur-md px-6 py-3 rounded-2xl mx-auto z-10 shadow-2xl border border-[#35373c] mt-3">
+      <div className="flex items-center justify-center gap-3 bg-[var(--bg-card)]/90 backdrop-blur-md px-6 py-3 rounded-2xl mx-auto z-10 shadow-2xl border border-[var(--border-card)] mt-3 transition-colors">
         {/* Toggle Mute */}
         <button
           onClick={onToggleMute}
@@ -1374,7 +1374,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           className={`p-3 rounded-full transition-all cursor-pointer ${
             currentUser.isMuted
               ? 'bg-[#f23f43] text-white hover:bg-[#da373c]'
-              : 'bg-[#35373c] text-[#f2f3f5] hover:bg-[#404249]'
+              : 'bg-[var(--bg-hover)] text-[var(--text-header)] hover:bg-[var(--bg-active)]'
           }`}
         >
           {currentUser.isMuted ? <MicOff size={22} /> : <Mic size={22} />}
@@ -1387,7 +1387,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           className={`p-3 rounded-full transition-all cursor-pointer ${
             currentUser.isDeafened
               ? 'bg-[#f23f43] text-white hover:bg-[#da373c]'
-              : 'bg-[#35373c] text-[#f2f3f5] hover:bg-[#404249]'
+              : 'bg-[var(--bg-hover)] text-[var(--text-header)] hover:bg-[var(--bg-active)]'
           }`}
         >
           <Headphones size={22} />
@@ -1400,7 +1400,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           className={`p-3 rounded-full transition-all cursor-pointer ${
             isVideoActive
               ? 'bg-[#23a55a] text-white hover:bg-[#1f9450]'
-              : 'bg-[#35373c] text-[#f2f3f5] hover:bg-[#404249]'
+              : 'bg-[var(--bg-hover)] text-[var(--text-header)] hover:bg-[var(--bg-active)]'
           }`}
         >
           {isVideoActive ? <Video size={22} /> : <VideoOff size={22} />}
@@ -1432,7 +1432,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         <button
           onClick={onLeaveVoice}
           title="Desconectar do Canal"
-          className="bg-[#35373c] hover:bg-[#f23f43] text-white p-3 rounded-full transition-all cursor-pointer"
+          className="bg-[var(--bg-hover)] hover:bg-[#f23f43] text-[var(--text-header)] hover:text-white p-3 rounded-full transition-all cursor-pointer"
         >
           <PhoneOff size={22} />
         </button>
@@ -1440,23 +1440,23 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
       {/* REUNI-AI "GO LIVE" MODAL */}
       {showGoLiveModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn select-none">
-          <div className="bg-[#313338] w-full max-w-lg rounded-xl shadow-2xl border border-[#1f2023] overflow-hidden flex flex-col">
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs animate-fadeIn select-none">
+          <div className="bg-[var(--bg-modal)] w-full max-w-lg rounded-xl shadow-2xl border border-[var(--border-card)] overflow-hidden flex flex-col">
             {/* Modal Header */}
-            <div className="p-6 text-center relative border-b border-[#1f2023]/60 bg-[#2b2d31]">
+            <div className="p-6 text-center relative border-b border-[var(--border-card)] bg-[var(--bg-modal-header)]">
               <button
                 onClick={() => setShowGoLiveModal(false)}
-                className="absolute right-4 top-4 text-[#949ba4] hover:text-[#f2f3f5] p-1.5 rounded-full hover:bg-[#35373c] transition-colors cursor-pointer"
+                className="absolute right-4 top-4 text-[var(--text-muted)] hover:text-[var(--text-header)] p-1.5 rounded-full hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
               >
                 <X size={20} />
               </button>
               <div className="w-14 h-14 bg-[#5865f2] rounded-full flex items-center justify-center text-white mx-auto mb-3 shadow-lg">
                 <Monitor size={30} />
               </div>
-              <h2 className="text-xl font-bold text-[#f2f3f5] tracking-wide">
+              <h2 className="text-xl font-bold text-[var(--text-header)] tracking-wide">
                 TRANSMITIR AO VIVO
               </h2>
-              <p className="text-xs text-[#949ba4] mt-1">
+              <p className="text-xs text-[var(--text-muted)] mt-1">
                 Compartilhe sua tela, jogos ou janelas de aplicativos com todos no canal #{channel.name}.
               </p>
             </div>
@@ -1465,7 +1465,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
             <div className="p-6 space-y-5">
               {/* Stream Title */}
               <div>
-                <label className="block text-xs font-bold text-[#b5bac1] uppercase tracking-wider mb-2">
+                <label className="block text-xs font-bold text-[var(--text-interactive)] uppercase tracking-wider mb-2">
                   Título da Transmissão
                 </label>
                 <input
@@ -1473,13 +1473,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                   value={streamTitle}
                   onChange={(e) => setStreamTitle(e.target.value)}
                   placeholder="O que você está transmitindo?"
-                  className="w-full bg-[#1e1f22] border border-[#232428] rounded p-2.5 text-sm text-[#f2f3f5] outline-none focus:border-[#5865f2] transition-colors"
+                  className="w-full bg-[var(--bg-input)] border border-[var(--border-card)] rounded p-2.5 text-sm text-[var(--text-normal)] outline-none focus:border-[#5865f2] transition-colors"
                 />
               </div>
 
               {/* Quality Preset Buttons */}
               <div>
-                <label className="block text-xs font-bold text-[#b5bac1] uppercase tracking-wider mb-2">
+                <label className="block text-xs font-bold text-[var(--text-interactive)] uppercase tracking-wider mb-2">
                   Qualidade da Transmissão
                 </label>
                 <div className="grid grid-cols-2 gap-3">
@@ -1488,17 +1488,17 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                     onClick={() => setStreamQuality('720p')}
                     className={`p-3 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
                       streamQuality === '720p'
-                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-white'
-                        : 'bg-[#2b2d31] border-transparent text-[#949ba4] hover:bg-[#35373c]'
+                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-[var(--text-header)]'
+                        : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-sm text-[#f2f3f5]">720p HD</span>
-                      <span className="text-[10px] bg-[#404249] text-[#dbdee1] px-1.5 py-0.5 rounded font-bold">
+                      <span className="font-bold text-sm text-[var(--text-header)]">720p HD</span>
+                      <span className="text-[10px] bg-[var(--bg-hover)] text-[var(--text-normal)] px-1.5 py-0.5 rounded font-bold">
                         Padrão
                       </span>
                     </div>
-                    <span className="text-xs text-[#949ba4]">Ótimo equilíbrio e desempenho leve</span>
+                    <span className="text-xs text-[var(--text-muted)]">Ótimo equilíbrio e desempenho leve</span>
                   </button>
 
                   <button
@@ -1506,24 +1506,24 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                     onClick={() => setStreamQuality('1080p')}
                     className={`p-3 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
                       streamQuality === '1080p'
-                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-white'
-                        : 'bg-[#2b2d31] border-transparent text-[#949ba4] hover:bg-[#35373c]'
+                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-[var(--text-header)]'
+                        : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-sm text-[#f2f3f5]">1080p Full HD</span>
+                      <span className="font-bold text-sm text-[var(--text-header)]">1080p Full HD</span>
                       <span className="text-[10px] bg-[#5865f2] text-white px-1.5 py-0.5 rounded font-bold flex items-center gap-0.5">
                         <Sparkles size={10} /> Pro
                       </span>
                     </div>
-                    <span className="text-xs text-[#949ba4]">Máxima nitidez para textos e games</span>
+                    <span className="text-xs text-[var(--text-muted)]">Máxima nitidez para textos e games</span>
                   </button>
                 </div>
               </div>
 
               {/* FPS Selector */}
               <div>
-                <label className="block text-xs font-bold text-[#b5bac1] uppercase tracking-wider mb-2">
+                <label className="block text-xs font-bold text-[var(--text-interactive)] uppercase tracking-wider mb-2">
                   Taxa de Quadros (FPS)
                 </label>
                 <div className="grid grid-cols-2 gap-3">
@@ -1532,8 +1532,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                     onClick={() => setStreamFps(30)}
                     className={`py-2 px-3 rounded-lg border font-semibold text-sm transition-all cursor-pointer ${
                       streamFps === 30
-                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-white'
-                        : 'bg-[#2b2d31] border-transparent text-[#949ba4] hover:bg-[#35373c]'
+                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-[var(--text-header)]'
+                        : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
                     }`}
                   >
                     30 FPS
@@ -1544,8 +1544,8 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                     onClick={() => setStreamFps(60)}
                     className={`py-2 px-3 rounded-lg border font-semibold text-sm transition-all cursor-pointer ${
                       streamFps === 60
-                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-white'
-                        : 'bg-[#2b2d31] border-transparent text-[#949ba4] hover:bg-[#35373c]'
+                        ? 'bg-[#5865f2]/10 border-[#5865f2] text-[var(--text-header)]'
+                        : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
                     }`}
                   >
                     60 FPS
@@ -1555,11 +1555,11 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
             </div>
 
             {/* Modal Actions */}
-            <div className="bg-[#2b2d31] px-6 py-4 flex items-center justify-between border-t border-[#1f2023]">
+            <div className="bg-[var(--bg-modal-header)] px-6 py-4 flex items-center justify-between border-t border-[var(--border-card)]">
               <button
                 type="button"
                 onClick={() => setShowGoLiveModal(false)}
-                className="text-sm font-medium text-[#f2f3f5] hover:underline cursor-pointer"
+                className="text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-header)] hover:underline cursor-pointer"
               >
                 Cancelar
               </button>

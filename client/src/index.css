@@ -19,6 +19,10 @@
   --text-interactive: #b5bac1;
   --scrollbar-thumb: #1a1b1e;
   --scrollbar-thumb-hover: #111214;
+  --bg-stage: #111214;
+  --bg-stage-card: #2b2d31;
+  --bg-stage-card-inner: #232428;
+  --border-stage: #1e1f22;
 }
 
 .theme-light {
@@ -40,6 +44,10 @@
   --text-interactive: #4f545c;
   --scrollbar-thumb: #cccccc;
   --scrollbar-thumb-hover: #aaaaaa;
+  --bg-stage: #ffffff;
+  --bg-stage-card: #f2f3f5;
+  --bg-stage-card-inner: #e8eaed;
+  --border-stage: #e3e5e8;
 }
 
 @theme {
