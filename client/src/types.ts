@@ -10,6 +10,7 @@ export interface User {
   isDeafened?: boolean;
   isStreaming?: boolean;
   streamTitle?: string;
+  isVideoActive?: boolean;
 }
 
 export interface Channel {

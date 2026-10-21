@@ -33,6 +33,7 @@ export interface User {
   isDeafened?: boolean;
   isStreaming?: boolean;
   streamTitle?: string;
+  isVideoActive?: boolean;
 }
 
 export interface Channel {
@@ -320,10 +321,24 @@ io.on('connection', (socket: Socket) => {
     session.user.voiceChannelId = null;
     session.user.isStreaming = false;
     session.user.streamTitle = undefined;
+    session.user.isVideoActive = false;
     io.emit('voice:state_update', {
       userId: session.user.id,
       voiceChannelId: null,
       isStreaming: false,
+      isVideoActive: false,
+    });
+  });
+
+  socket.on('voice:toggle_video', (isActive: boolean) => {
+    const session = connectedUsers.get(socket.id);
+    if (!session) return;
+
+    session.user.isVideoActive = Boolean(isActive);
+    io.emit('voice:state_update', {
+      userId: session.user.id,
+      voiceChannelId: session.user.voiceChannelId,
+      isVideoActive: session.user.isVideoActive,
     });
   });
 

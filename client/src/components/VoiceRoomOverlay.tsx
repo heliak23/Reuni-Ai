@@ -114,6 +114,54 @@ const RemoteAudioPlayer: React.FC<{
   );
 };
 
+// Component to render video streams (camera / screen) with robust playback handling
+const VideoStreamPlayer: React.FC<{
+  stream: MediaStream;
+  isMuted?: boolean;
+  className?: string;
+}> = ({ stream, isMuted = false, className = '' }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+
+    if (el.srcObject !== stream) {
+      el.srcObject = stream;
+    }
+
+    const tryPlay = async () => {
+      try {
+        await el.play();
+      } catch (err) {
+        console.warn('[WebRTC Video] Autoplay aguardando interação:', err);
+      }
+    };
+
+    tryPlay();
+
+    const onUserInteraction = () => {
+      el.play().catch(() => {});
+    };
+    window.addEventListener('click', onUserInteraction, { once: true });
+    window.addEventListener('keydown', onUserInteraction, { once: true });
+    return () => {
+      window.removeEventListener('click', onUserInteraction);
+      window.removeEventListener('keydown', onUserInteraction);
+    };
+  }, [stream]);
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={isMuted}
+      className={className}
+    />
+  );
+};
+
 interface VoiceRoomOverlayProps {
   channel: Channel;
   connectedUsers: User[];
@@ -152,13 +200,13 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
   // WebRTC mesh state
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
+  const [remoteCameraStreams, setRemoteCameraStreams] = useState<Map<string, MediaStream>>(new Map());
   const [remoteAudioStreams, setRemoteAudioStreams] = useState<Map<string, MediaStream>>(new Map());
   const [speakingUsers, setSpeakingUsers] = useState<Set<string>>(new Set());
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'idle'>('idle');
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
-  const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const stageContainerRef = useRef<HTMLDivElement>(null);
 
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -172,7 +220,9 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const audioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+  const cameraSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
   const screenSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+  const trackMetadataRef = useRef<Map<string, 'camera' | 'screen'>>(new Map());
 
   // Active members in this voice channel
   const members = connectedUsers.filter((u) => u.voiceChannelId === channel.id);
@@ -194,11 +244,11 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     peerConnectionsRef.current.set(remoteUserId, pc);
     setConnectionStatus('connecting');
 
-    // Attach local microphone audio track if available
+    // 1. Attach local microphone audio track if available
     const activeMic = microphoneStreamRef.current || localMicStream;
     if (activeMic) {
       const audioTrack = activeMic.getAudioTracks()[0];
-      if (audioTrack) {
+      if (audioTrack && !audioSendersRef.current.has(remoteUserId)) {
         audioTrack.enabled = !currentUser.isMuted;
         try {
           const sender = pc.addTrack(audioTrack, activeMic);
@@ -210,14 +260,46 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       }
     }
 
-    // Attach local screen video if currently screen sharing
+    // 2. Attach local camera video if currently active
+    if (cameraStreamRef.current) {
+      const camTrack = cameraStreamRef.current.getVideoTracks()[0];
+      if (camTrack && !cameraSendersRef.current.has(remoteUserId)) {
+        try {
+          const sender = pc.addTrack(camTrack, cameraStreamRef.current);
+          cameraSendersRef.current.set(remoteUserId, sender);
+          console.log(`[WebRTC] Câmera local anexada ao peer: ${remoteUserId}`);
+          socket.emit('webrtc:signal', {
+            to: remoteUserId,
+            signal: {
+              type: 'track_metadata',
+              trackId: camTrack.id,
+              streamId: cameraStreamRef.current.id,
+              trackKind: 'camera',
+            },
+          });
+        } catch (err) {
+          console.warn('[WebRTC] Erro ao anexar câmera:', err);
+        }
+      }
+    }
+
+    // 3. Attach local screen video if currently screen sharing
     if (screenStreamRef.current) {
       const videoTrack = screenStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
+      if (videoTrack && !screenSendersRef.current.has(remoteUserId)) {
         try {
           const sender = pc.addTrack(videoTrack, screenStreamRef.current);
           screenSendersRef.current.set(remoteUserId, sender);
           console.log(`[WebRTC] Tela local anexada ao peer: ${remoteUserId}`);
+          socket.emit('webrtc:signal', {
+            to: remoteUserId,
+            signal: {
+              type: 'track_metadata',
+              trackId: videoTrack.id,
+              streamId: screenStreamRef.current.id,
+              trackKind: 'screen',
+            },
+          });
         } catch (err) {
           console.warn('[WebRTC] Erro ao anexar tela:', err);
         }
@@ -234,9 +316,9 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       }
     };
 
-    // Receive incoming tracks (audio & video/screen)
+    // Receive incoming tracks (audio & video/screen/camera)
     pc.ontrack = (event) => {
-      console.log(`[WebRTC] Faixa recebida de ${remoteUserId}: ${event.track.kind}`);
+      console.log(`[WebRTC] Faixa recebida de ${remoteUserId}: ${event.track.kind} (id: ${event.track.id})`);
       if (event.track.kind === 'audio') {
         const stream = event.streams[0] || new MediaStream([event.track]);
         setRemoteAudioStreams((prev) => {
@@ -248,6 +330,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
 
         event.track.onended = () => {
           setRemoteAudioStreams((prev) => {
+            if (!prev.has(remoteUserId)) return prev;
             const next = new Map(prev);
             next.delete(remoteUserId);
             return next;
@@ -255,11 +338,36 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         };
       } else if (event.track.kind === 'video') {
         const stream = event.streams[0] || new MediaStream([event.track]);
-        setRemoteScreenStream(stream);
+        const trackKind = trackMetadataRef.current.get(event.track.id);
 
-        event.track.onended = () => {
-          setRemoteScreenStream(null);
-        };
+        const isScreen =
+          trackKind === 'screen' ||
+          (trackKind !== 'camera' && members.some((m) => m.id === remoteUserId && m.isStreaming));
+
+        if (isScreen) {
+          console.log(`[WebRTC] Stream de tela recebido de ${remoteUserId}`);
+          setRemoteScreenStream(stream);
+
+          event.track.onended = () => {
+            setRemoteScreenStream(null);
+          };
+        } else {
+          console.log(`[WebRTC] Stream de câmera recebido de ${remoteUserId}`);
+          setRemoteCameraStreams((prev) => {
+            const next = new Map(prev);
+            next.set(remoteUserId, stream);
+            return next;
+          });
+
+          event.track.onended = () => {
+            setRemoteCameraStreams((prev) => {
+              if (!prev.has(remoteUserId)) return prev;
+              const next = new Map(prev);
+              next.delete(remoteUserId);
+              return next;
+            });
+          };
+        }
       }
     };
 
@@ -274,6 +382,12 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           next.delete(remoteUserId);
           return next;
         });
+        setRemoteCameraStreams((prev) => {
+          if (!prev.has(remoteUserId)) return prev;
+          const next = new Map(prev);
+          next.delete(remoteUserId);
+          return next;
+        });
         if (peerConnectionsRef.current.size <= 1) {
           setConnectionStatus('idle');
         }
@@ -281,7 +395,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     };
 
     return pc;
-  }, [currentUser.isMuted, localMicStream]);
+  }, [currentUser.isMuted, localMicStream, members]);
 
   // 2. WebRTC Signaling Listener
   useEffect(() => {
@@ -292,8 +406,21 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
       try {
         const pc = getOrCreatePeerConnection(from);
 
-        if (signal.type === 'offer') {
+        if (signal.type === 'track_metadata') {
+          console.log(`[WebRTC] Metadados de faixa recebidos de ${from}:`, signal);
+          trackMetadataRef.current.set(signal.trackId, signal.trackKind);
+        } else if (signal.type === 'offer') {
           console.log(`[WebRTC] Recebeu Offer de ${from}`);
+          const isPolite = currentUser.id < from;
+          if (pc.signalingState !== 'stable') {
+            if (!isPolite) {
+              console.log(`[WebRTC] Glare: ignorando oferta de ${from} (impolite peer)`);
+              return;
+            }
+            console.log(`[WebRTC] Glare: revertendo oferta local para aceitar oferta de ${from} (polite peer)`);
+            await pc.setLocalDescription({ type: 'rollback' });
+          }
+
           await pc.setRemoteDescription(new RTCSessionDescription(signal));
 
           // Flush queued ICE candidates
@@ -313,14 +440,16 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           console.log(`[WebRTC] Enviou Answer para ${from}`);
         } else if (signal.type === 'answer') {
           console.log(`[WebRTC] Recebeu Answer de ${from}`);
-          await pc.setRemoteDescription(new RTCSessionDescription(signal));
+          if (pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal));
 
-          // Flush queued ICE candidates
-          const queued = pendingCandidatesRef.current.get(from) || [];
-          for (const cand of queued) {
-            await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+            // Flush queued ICE candidates
+            const queued = pendingCandidatesRef.current.get(from) || [];
+            for (const cand of queued) {
+              await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+            }
+            pendingCandidatesRef.current.delete(from);
           }
-          pendingCandidatesRef.current.delete(from);
         } else if (signal.type === 'candidate' && signal.candidate) {
           if (!pc.remoteDescription) {
             const list = pendingCandidatesRef.current.get(from) || [];
@@ -376,8 +505,15 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
         pc.close();
         peerConnectionsRef.current.delete(peerId);
         audioSendersRef.current.delete(peerId);
+        cameraSendersRef.current.delete(peerId);
         screenSendersRef.current.delete(peerId);
         setRemoteAudioStreams((prev) => {
+          if (!prev.has(peerId)) return prev;
+          const next = new Map(prev);
+          next.delete(peerId);
+          return next;
+        });
+        setRemoteCameraStreams((prev) => {
           if (!prev.has(peerId)) return prev;
           const next = new Map(prev);
           next.delete(peerId);
@@ -541,19 +677,7 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     }
   }, [activeScreenStream]);
 
-  // 9. Camera Video
-  useEffect(() => {
-    if (isVideoActive && cameraStreamRef.current && cameraVideoRef.current) {
-      if (cameraVideoRef.current.srcObject !== cameraStreamRef.current) {
-        cameraVideoRef.current.srcObject = cameraStreamRef.current;
-        cameraVideoRef.current.play().catch((err) => {
-          console.warn('Erro ao reproduzir câmera:', err);
-        });
-      }
-    }
-  }, [isVideoActive]);
-
-  // 10. Start Screen Streaming (Go Live)
+  // 9. Start Screen Streaming (Go Live)
   const handleConfirmStartStream = async () => {
     setShowGoLiveModal(false);
 
@@ -581,9 +705,21 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           const sender = pc.addTrack(videoTrack, stream);
           screenSendersRef.current.set(peerId, sender);
 
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit('webrtc:signal', { to: peerId, signal: offer });
+          socket.emit('webrtc:signal', {
+            to: peerId,
+            signal: {
+              type: 'track_metadata',
+              trackId: videoTrack.id,
+              streamId: stream.id,
+              trackKind: 'screen',
+            },
+          });
+
+          if (pc.signalingState === 'stable') {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+          }
         } catch (err) {
           console.warn('[WebRTC] Erro ao transmitir tela para peer:', err);
         }
@@ -615,9 +751,11 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           pc.removeTrack(sender);
           screenSendersRef.current.delete(peerId);
 
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit('webrtc:signal', { to: peerId, signal: offer });
+          if (pc.signalingState === 'stable') {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+          }
         } catch (err) {
           console.warn('[WebRTC] Erro ao remover track de tela do peer:', err);
         }
@@ -628,25 +766,94 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
     onStopStream();
   };
 
+  // Turn Off Camera Helper
+  const handleTurnOffVideo = () => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    setIsVideoActive(false);
+
+    // Notify server that our camera is now off
+    socket.emit('voice:toggle_video', false);
+
+    // Remove camera sender from all peer connections and renegotiate
+    peerConnectionsRef.current.forEach(async (pc, peerId) => {
+      const sender = cameraSendersRef.current.get(peerId);
+      if (sender) {
+        try {
+          pc.removeTrack(sender);
+          cameraSendersRef.current.delete(peerId);
+
+          if (pc.signalingState === 'stable') {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('webrtc:signal', { to: peerId, signal: offer });
+            console.log(`[WebRTC] Câmera removida e oferta enviada para ${peerId}`);
+          }
+        } catch (err) {
+          console.warn('[WebRTC] Erro ao remover câmera do peer:', err);
+        }
+      }
+    });
+  };
+
   // Toggle Camera
   const handleToggleVideo = async () => {
     if (!isVideoActive) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'user',
+          },
+        });
         cameraStreamRef.current = stream;
         setIsVideoActive(true);
+
+        const videoTrack = stream.getVideoTracks()[0];
+
+        // Notify server that our camera is active
+        socket.emit('voice:toggle_video', true);
+
+        // Attach track to all existing peers and renegotiate
+        peerConnectionsRef.current.forEach(async (pc, peerId) => {
+          if (videoTrack) {
+            try {
+              const sender = pc.addTrack(videoTrack, stream);
+              cameraSendersRef.current.set(peerId, sender);
+
+              socket.emit('webrtc:signal', {
+                to: peerId,
+                signal: {
+                  type: 'track_metadata',
+                  trackId: videoTrack.id,
+                  streamId: stream.id,
+                  trackKind: 'camera',
+                },
+              });
+
+              if (pc.signalingState === 'stable') {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('webrtc:signal', { to: peerId, signal: offer });
+                console.log(`[WebRTC] Câmera anexada e oferta enviada para ${peerId}`);
+              }
+            } catch (err) {
+              console.warn('[WebRTC] Erro ao anexar câmera ao peer:', err);
+            }
+          }
+        });
+
+        videoTrack.onended = () => {
+          handleTurnOffVideo();
+        };
       } catch (err) {
         console.warn('Câmera não acessível:', err);
       }
     } else {
-      if (cameraStreamRef.current) {
-        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-        cameraStreamRef.current = null;
-      }
-      if (cameraVideoRef.current) {
-        cameraVideoRef.current.srcObject = null;
-      }
-      setIsVideoActive(false);
+      handleTurnOffVideo();
     }
   };
 
@@ -665,11 +872,23 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+        cameraStreamRef.current = null;
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((track) => track.stop());
+        screenStreamRef.current = null;
+      }
+      socket.emit('voice:toggle_video', false);
       peerConnectionsRef.current.forEach((pc) => pc.close());
       peerConnectionsRef.current.clear();
       audioSendersRef.current.clear();
+      cameraSendersRef.current.clear();
       screenSendersRef.current.clear();
+      trackMetadataRef.current.clear();
       setRemoteAudioStreams(new Map());
+      setRemoteCameraStreams(new Map());
     };
   }, []);
 
@@ -759,6 +978,11 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
                   <span className="text-xs font-medium text-[#f2f3f5] whitespace-nowrap">
                     {member.username} {isMe && '(Você)'}
                   </span>
+                  {((isMe && isVideoActive) || remoteCameraStreams.has(member.id)) && (
+                    <span className="bg-[#23a55a]/20 text-[#23a55a] p-0.5 rounded-full" title="Câmera Ativa">
+                      <Video size={11} />
+                    </span>
+                  )}
                   {member.isStreaming && (
                     <span className="bg-[#f23f43] text-[9px] text-white font-extrabold px-1 rounded uppercase">
                       AO VIVO
@@ -838,69 +1062,112 @@ export const VoiceRoomOverlay: React.FC<VoiceRoomOverlayProps> = ({
           </div>
         </div>
       ) : (
-        /* NORMAL USER CARDS GRID */
-        <div className="flex-1 flex flex-col items-center justify-center my-4 overflow-y-auto">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 max-w-4xl w-full">
+        /* NORMAL USER CARDS / VIDEO CALL GRID */
+        <div className="flex-1 flex flex-col items-center justify-center my-4 overflow-y-auto w-full px-2">
+          <div
+            className={`grid gap-4 sm:gap-6 w-full max-w-5xl ${
+              displayMembers.length === 1
+                ? 'grid-cols-1 max-w-2xl'
+                : displayMembers.length === 2
+                ? 'grid-cols-1 md:grid-cols-2'
+                : displayMembers.length <= 4
+                ? 'grid-cols-1 sm:grid-cols-2'
+                : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
+            }`}
+          >
             {displayMembers.map((member) => {
               const isMe = member.id === currentUser.id;
               const speaking = isMe ? isSpeakingLocal : speakingUsers.has(member.id);
+              const activeVideoStream = isMe
+                ? isVideoActive
+                  ? cameraStreamRef.current
+                  : null
+                : remoteCameraStreams.get(member.id);
 
               return (
                 <div
                   key={member.id}
-                  className={`relative bg-[#2b2d31] rounded-2xl p-6 flex flex-col items-center justify-center transition-all duration-200 border-2 ${
+                  className={`relative bg-[#2b2d31] rounded-2xl overflow-hidden transition-all duration-200 border-2 shadow-xl flex flex-col ${
                     speaking
-                      ? 'border-[#23a55a] shadow-[0_0_20px_rgba(35,165,90,0.4)] scale-[1.02]'
-                      : 'border-transparent shadow-lg'
+                      ? 'border-[#23a55a] shadow-[0_0_24px_rgba(35,165,90,0.45)] scale-[1.01]'
+                      : 'border-[#1e1f22]'
                   }`}
                 >
-                  {/* User Camera Video if active */}
-                  {isMe && isVideoActive ? (
-                    <video
-                      ref={(el) => {
-                        cameraVideoRef.current = el;
-                        if (el && cameraStreamRef.current && el.srcObject !== cameraStreamRef.current) {
-                          el.srcObject = cameraStreamRef.current;
-                          el.play().catch(() => {});
-                        }
-                      }}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-32 h-32 rounded-full object-cover mb-4 ring-4 ring-[#23a55a]"
-                    />
+                  {/* Video Tile or Avatar Tile */}
+                  {activeVideoStream ? (
+                    <div className="w-full aspect-video relative bg-black flex items-center justify-center overflow-hidden">
+                      <VideoStreamPlayer
+                        stream={activeVideoStream}
+                        isMuted={isMe}
+                        className="w-full h-full object-cover"
+                      />
+                      {/* Gradient for text contrast */}
+                      <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/85 via-black/40 to-transparent pointer-events-none" />
+
+                      {/* Top badges */}
+                      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-lg border border-white/10 z-10 text-xs font-semibold text-white">
+                        <Video size={13} className="text-[#23a55a]" />
+                        <span>Câmera</span>
+                      </div>
+
+                      {/* Bottom user info bar */}
+                      <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between z-10 pointer-events-none">
+                        <div className="flex items-center gap-2 truncate">
+                          <img
+                            src={member.avatar}
+                            alt={member.username}
+                            onError={(e) => handleAvatarError(e, member.id.startsWith('bot'))}
+                            className="w-6 h-6 rounded-full object-cover ring-1 ring-white/30 flex-shrink-0"
+                          />
+                          <span className="text-sm font-bold text-white truncate drop-shadow-md">
+                            {member.username} {isMe && '(Você)'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {member.isMuted && (
+                            <span className="bg-[#f23f43] p-1.5 rounded-full text-white shadow-md">
+                              <MicOff size={13} />
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   ) : (
-                    <div className="relative mb-4">
-                      <img
-                        src={member.avatar}
-                        alt={member.username}
-                        onError={(e) => handleAvatarError(e, member.id.startsWith('bot'))}
-                        className={`w-28 h-28 rounded-full object-cover transition-all duration-200 ${
-                          speaking ? 'ring-4 ring-[#23a55a]' : 'ring-2 ring-transparent'
-                        }`}
-                      />
-                      <div
-                        className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#2b2d31] ${
-                          member.status === 'online'
-                            ? 'bg-[#23a55a]'
-                            : member.status === 'idle'
-                            ? 'bg-[#f0b232]'
-                            : 'bg-[#f23f43]'
-                        }`}
-                      />
+                    <div className="w-full aspect-video bg-[#232428] flex flex-col items-center justify-center p-6 relative">
+                      <div className="relative mb-3">
+                        <img
+                          src={member.avatar}
+                          alt={member.username}
+                          onError={(e) => handleAvatarError(e, member.id.startsWith('bot'))}
+                          className={`w-24 h-24 rounded-full object-cover transition-all duration-200 ${
+                            speaking
+                              ? 'ring-4 ring-[#23a55a] shadow-[0_0_16px_rgba(35,165,90,0.5)]'
+                              : 'ring-2 ring-transparent'
+                          }`}
+                        />
+                        <div
+                          className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#2b2d31] ${
+                            member.status === 'online'
+                              ? 'bg-[#23a55a]'
+                              : member.status === 'idle'
+                              ? 'bg-[#f0b232]'
+                              : 'bg-[#f23f43]'
+                          }`}
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-base text-[#f2f3f5] truncate max-w-[200px]">
+                          {member.username} {isMe && '(Você)'}
+                        </span>
+                        {member.isMuted && <MicOff size={16} className="text-[#f23f43] flex-shrink-0" />}
+                      </div>
+
+                      <span className="text-xs text-[#949ba4] mt-1">
+                        {speaking ? 'Falando...' : member.customStatus || 'Conectado'}
+                      </span>
                     </div>
                   )}
-
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-lg text-[#f2f3f5]">
-                      {member.username} {isMe && '(Você)'}
-                    </span>
-                    {member.isMuted && <MicOff size={16} className="text-[#f23f43]" />}
-                  </div>
-
-                  <span className="text-xs text-[#949ba4] mt-1">
-                    {speaking ? 'Falando...' : member.customStatus || 'Conectado'}
-                  </span>
                 </div>
               );
             })}

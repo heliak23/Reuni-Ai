@@ -174,7 +174,7 @@ export const App: React.FC = () => {
       });
     });
 
-    socket.on('voice:state_update', (data: { userId: string; voiceChannelId: string | null; isMuted?: boolean; isDeafened?: boolean; isStreaming?: boolean; streamTitle?: string }) => {
+    socket.on('voice:state_update', (data: { userId: string; voiceChannelId: string | null; isMuted?: boolean; isDeafened?: boolean; isStreaming?: boolean; streamTitle?: string; isVideoActive?: boolean }) => {
       setOnlineUsers((prev) =>
         prev.map((u) =>
           u.id === data.userId
@@ -185,6 +185,7 @@ export const App: React.FC = () => {
                 isDeafened: data.isDeafened !== undefined ? data.isDeafened : u.isDeafened,
                 isStreaming: data.isStreaming !== undefined ? data.isStreaming : u.isStreaming,
                 streamTitle: data.streamTitle !== undefined ? data.streamTitle : u.streamTitle,
+                isVideoActive: data.isVideoActive !== undefined ? data.isVideoActive : u.isVideoActive,
               }
             : u
         )
@@ -198,6 +199,7 @@ export const App: React.FC = () => {
           isDeafened: data.isDeafened !== undefined ? data.isDeafened : prev.isDeafened,
           isStreaming: data.isStreaming !== undefined ? data.isStreaming : prev.isStreaming,
           streamTitle: data.streamTitle !== undefined ? data.streamTitle : prev.streamTitle,
+          isVideoActive: data.isVideoActive !== undefined ? data.isVideoActive : prev.isVideoActive,
         }));
       }
     });
